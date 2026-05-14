@@ -11,6 +11,7 @@ concurrency:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    environment: production
     steps:
       - name: SSH and run deploy.sh
         uses: appleboy/ssh-action@v1.0.3
