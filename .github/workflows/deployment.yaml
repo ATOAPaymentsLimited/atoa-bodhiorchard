@@ -10,8 +10,8 @@ concurrency:
 
 jobs:
   deploy:
-    runs-on: ubuntu-latest
-    environment: production
+    runs-on: 
+      group: ActionRunnerLocalGroup
     steps:
       - name: SSH and run deploy.sh
         uses: appleboy/ssh-action@v1.0.3
