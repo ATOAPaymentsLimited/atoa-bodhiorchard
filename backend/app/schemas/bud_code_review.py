@@ -19,7 +19,59 @@ to their endpoint surface area instead of inflating the core BUD CRUD
 module.
 """
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
+
+# Lifecycle states surfaced on the Code Review tab for the latest
+# ``code_review`` agent task. Drives a banner above the per-repo PR list:
+#
+# * ``never_run`` — no task has run for this BUD yet (rare in normal flow,
+#   but possible if the agent was force-skipped by the no-open-PRs guard).
+#   No banner.
+# * ``running`` — a task is in-flight. Optional "agent running…" banner.
+# * ``ok`` — last run succeeded (parse_ok). No banner.
+# * ``parse_failed`` — last run completed but its JSON was unparseable.
+#   Banner with the typed ``last_run_message`` (see
+#   ``_parse_failure_reason`` in agent_result_handlers).
+# * ``failed`` — last task row is in status FAILED (subprocess crash,
+#   skill error, etc.).
+CodeReviewRunStatus = Literal["never_run", "running", "ok", "parse_failed", "failed"]
+
+
+# Banner copy surfaced on the Code Review tab when the last agent run
+# could not be parsed. Reason values come from
+# :func:`app.services.agent_result_handlers._parse_code_review_output`
+# and are persisted on ``BUDAgentTask.result_summary.parse_failure_reason``.
+# Co-located here (rather than in the service layer) so the API
+# contract — types AND user-facing copy — lives in one place.
+PARSE_FAILURE_MESSAGES: dict[str, str] = {
+    "insight_contaminated": (
+        "Code review agent output was wrapped in ★ Insight blocks (a Claude "
+        "output-style plugin contaminated the response). Disable the "
+        "learning/explanatory output-style plugin on the backend host, then "
+        "re-run the review."
+    ),
+    "no_json": (
+        "Code review agent did not return JSON. Check the backend logs for "
+        "``code_review_output_no_json`` and re-run the review."
+    ),
+    "not_dict": (
+        "Code review agent returned malformed JSON (not an object). Check "
+        "the backend logs for ``code_review_output_not_dict`` and re-run."
+    ),
+    "parse_exception": (
+        "Code review agent output could not be parsed (extractor raised). "
+        "Check the backend logs and re-run the review."
+    ),
+}
+GENERIC_PARSE_FAILURE_MESSAGE = (
+    "Code review agent output was unparseable. Check the backend logs and re-run the review."
+)
+TASK_FAILED_MESSAGE = (
+    "Code review agent task failed before producing output. Check the "
+    "backend logs and re-run from the BUD."
+)
 
 
 class CodeReviewRepoStatus(BaseModel):
@@ -30,13 +82,25 @@ class CodeReviewRepoStatus(BaseModel):
     pr_number: int | None = None
     pr_state: str  # "not_raised" | "open" | "merged" | "closed"
     pr_url: str | None = None
+    # ``comment_count`` is the **unresolved** count (badge number on the
+    # tab). ``total_comment_count`` is every stored entry — useful for an
+    # "X resolved / Y total" tooltip. ``resolved_comment_count`` is the
+    # delta. Default ``total = resolved = 0`` so old clients that ignore
+    # the new fields still render the badge as before.
     comment_count: int
+    total_comment_count: int = 0
+    resolved_comment_count: int = 0
 
 
 class CodeReviewStatusResponse(BaseModel):
     """Response for GET /buds/{id}/code-review/status."""
 
     repos: list[CodeReviewRepoStatus]
+    last_run_status: CodeReviewRunStatus = "never_run"
+    # Short human-facing message for the banner when ``last_run_status``
+    # is ``parse_failed`` or ``failed``. ``None`` for the success / idle
+    # states so the frontend can short-circuit rendering.
+    last_run_message: str | None = None
 
 
 class CodeReviewOverrideRequest(BaseModel):

@@ -870,17 +870,34 @@ export interface PRChecklistItem {
 
 export type CodeReviewPRState = 'not_raised' | 'open' | 'merged' | 'closed'
 
+// Mirror of backend ``CodeReviewRunStatus`` (see schemas/bud_code_review.py).
+// Drives the parse-failure banner on the Code Review tab — banner renders
+// only for ``parse_failed`` and ``failed``.
+export type CodeReviewRunStatus =
+  | 'never_run'
+  | 'running'
+  | 'ok'
+  | 'parse_failed'
+  | 'failed'
+
 export interface CodeReviewRepoStatus {
   repo_id: string
   repo_name: string
   pr_number: number | null
   pr_state: CodeReviewPRState
   pr_url: string | null
+  /** Unresolved comment count — drives the badge number. */
   comment_count: number
+  /** Every stored comment (resolved + unresolved). Useful for "X / Y" tooltips. */
+  total_comment_count: number
+  /** Comments marked resolved via the ``pull_request_review_thread`` webhook. */
+  resolved_comment_count: number
 }
 
 export interface CodeReviewStatusResponse {
   repos: CodeReviewRepoStatus[]
+  last_run_status: CodeReviewRunStatus
+  last_run_message: string | null
 }
 
 // Mirror of backend `CodeReviewOverrideRequest` Pydantic constraints in

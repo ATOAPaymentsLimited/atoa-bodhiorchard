@@ -17,7 +17,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, watch } from 'vue'
 import { useBUDStore } from '@/stores/bud'
-import type { CodeReviewRepoStatus, CodeReviewPRState } from '@/types'
+import type { CodeReviewRepoStatus, CodeReviewRunStatus } from '@/types'
 import {
   CODE_REVIEW_OVERRIDE_REASON_MIN,
   CODE_REVIEW_OVERRIDE_REASON_MAX,
@@ -34,7 +34,17 @@ const emit = defineEmits<{
 const budStore = useBUDStore()
 
 const repos = ref<CodeReviewRepoStatus[]>([])
+const lastRunStatus = ref<CodeReviewRunStatus>('never_run')
+const lastRunMessage = ref<string | null>(null)
 const loading = ref(false)
+
+// Only surfaces parse_failed / failed states. The other states (running,
+// ok, never_run) communicate via the existing per-repo PR list and the
+// agent-running indicators elsewhere on the BUD page — a banner for
+// "ok" or "running" would be noisy duplication.
+const showRunBanner = computed(
+  () => lastRunStatus.value === 'parse_failed' || lastRunStatus.value === 'failed',
+)
 
 // Override dialog state
 const showOverrideDialog = ref(false)
@@ -56,7 +66,10 @@ const allMerged = computed(() =>
 
 async function loadStatus(): Promise<void> {
   loading.value = true
-  repos.value = await budStore.fetchCodeReviewStatus(props.budId)
+  const data = await budStore.fetchCodeReviewStatus(props.budId)
+  repos.value = data.repos
+  lastRunStatus.value = data.last_run_status
+  lastRunMessage.value = data.last_run_message
   loading.value = false
 }
 
@@ -83,8 +96,23 @@ async function submitOverride(): Promise<void> {
   }
 }
 
-function stateColor(state: CodeReviewPRState): string {
-  switch (state) {
+// PR-row helpers below take the whole ``CodeReviewRepoStatus`` (not just
+// ``pr_state``) because the "all threads resolved" signal — derived from
+// ``comment_count`` (unresolved) vs ``total_comment_count`` — modifies the
+// pill copy and colour for ``open`` PRs only: the user has finished the
+// review-thread back-and-forth but the PR still needs a Merge click.
+
+function isAwaitingMerge(repo: CodeReviewRepoStatus): boolean {
+  return (
+    repo.pr_state === 'open' &&
+    repo.total_comment_count > 0 &&
+    repo.comment_count === 0
+  )
+}
+
+function stateColor(repo: CodeReviewRepoStatus): string {
+  if (isAwaitingMerge(repo)) return 'success'
+  switch (repo.pr_state) {
     case 'merged': return 'success'
     case 'open': return 'info'
     case 'closed': return 'grey'
@@ -92,8 +120,9 @@ function stateColor(state: CodeReviewPRState): string {
   }
 }
 
-function stateIcon(state: CodeReviewPRState): string {
-  switch (state) {
+function stateIcon(repo: CodeReviewRepoStatus): string {
+  if (isAwaitingMerge(repo)) return 'mdi-check-circle-outline'
+  switch (repo.pr_state) {
     case 'merged': return 'mdi-source-merge'
     case 'open': return 'mdi-source-pull'
     case 'closed': return 'mdi-source-branch-remove'
@@ -101,13 +130,21 @@ function stateIcon(state: CodeReviewPRState): string {
   }
 }
 
-function stateLabel(state: CodeReviewPRState): string {
-  switch (state) {
+function stateLabel(repo: CodeReviewRepoStatus): string {
+  if (isAwaitingMerge(repo)) return 'Resolved · awaiting merge'
+  switch (repo.pr_state) {
     case 'merged': return 'Merged'
     case 'open': return 'Open'
     case 'closed': return 'Closed'
     case 'not_raised': return 'No PR'
   }
+}
+
+function commentBadgeTooltip(repo: CodeReviewRepoStatus): string {
+  if (repo.total_comment_count === 0) return ''
+  const resolved = repo.resolved_comment_count
+  const total = repo.total_comment_count
+  return `${repo.comment_count} unresolved · ${resolved} of ${total} resolved`
 }
 </script>
 
@@ -145,6 +182,21 @@ function stateLabel(state: CodeReviewPRState): string {
       </template>
     </div>
 
+    <!-- Last-run failure banner — only shown when the agent task itself
+         failed or its output was unparseable. The typed message comes
+         from the backend (bud_code_review_status._PARSE_FAILURE_MESSAGES)
+         so the user sees a *specific* fix hint, not generic prose. -->
+    <v-alert
+      v-if="showRunBanner && lastRunMessage"
+      type="error"
+      variant="tonal"
+      density="compact"
+      class="mb-3"
+      icon="mdi-alert-circle-outline"
+    >
+      {{ lastRunMessage }}
+    </v-alert>
+
     <!-- Per-repo status list -->
     <v-card v-if="repos.length > 0" variant="outlined" rounded="lg">
       <v-list density="compact" class="py-0">
@@ -157,8 +209,8 @@ function stateLabel(state: CodeReviewPRState): string {
           class="py-2"
         >
           <template #prepend>
-            <v-icon :color="stateColor(repo.pr_state)" size="small" class="mr-2">
-              {{ stateIcon(repo.pr_state) }}
+            <v-icon :color="stateColor(repo)" size="small" class="mr-2">
+              {{ stateIcon(repo) }}
             </v-icon>
           </template>
 
@@ -172,11 +224,11 @@ function stateLabel(state: CodeReviewPRState): string {
           <template #append>
             <v-chip
               size="x-small"
-              :color="stateColor(repo.pr_state)"
+              :color="stateColor(repo)"
               variant="tonal"
               class="mr-2"
             >
-              {{ stateLabel(repo.pr_state) }}
+              {{ stateLabel(repo) }}
             </v-chip>
             <v-chip
               v-if="repo.comment_count > 0"
@@ -184,6 +236,7 @@ function stateLabel(state: CodeReviewPRState): string {
               variant="tonal"
               class="mr-2"
               prepend-icon="mdi-comment-text-outline"
+              :title="commentBadgeTooltip(repo)"
             >
               {{ repo.comment_count }}
             </v-chip>
