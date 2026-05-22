@@ -42,7 +42,8 @@ const hasDescription = computed(() => !!props.todo.description)
 const locations = computed(() => props.todo.codeLocations ?? [])
 const visibleLocations = computed(() => locations.value.slice(0, MAX_VISIBLE_LOCATIONS))
 const overflowCount = computed(() => Math.max(0, locations.value.length - MAX_VISIBLE_LOCATIONS))
-const canExpand = computed(() => hasContext.value || hasDescription.value)
+// context_md is always shown; only description still needs click-to-expand
+const canExpand = computed(() => hasDescription.value)
 
 function renderInline(md: string): string {
   return DOMPurify.sanitize(marked.parseInline(md, { async: false }) as string)
@@ -74,15 +75,19 @@ function toggleExpanded() {
 <template>
   <div
     class="todo-row"
-    :class="{ 'todo-row--checkpoint': todo.isCheckpoint, 'todo-row--yours': isYours }"
+    :class="{
+      'todo-row--checkpoint': todo.isCheckpoint,
+      'todo-row--yours': isYours,
+      'todo-row--expandable': canExpand,
+    }"
     @click="toggleExpanded"
   >
     <div class="todo-row__status">
       <v-icon
         v-if="todo.isCheckpoint"
         size="small"
-        color="grey-darken-1"
-      >mdi-gate</v-icon>
+        color="primary"
+      >mdi-shield-check-outline</v-icon>
       <v-icon
         v-else
         :color="statusColor(todo.status)"
@@ -94,6 +99,13 @@ function toggleExpanded() {
       <div class="todo-row__title">
         <span class="todo-row__seq">#{{ todo.sequence }}</span>
         <span v-html="renderInline(todo.title)" />
+        <v-chip
+          v-if="todo.isCheckpoint"
+          size="x-small"
+          color="primary"
+          variant="tonal"
+          class="todo-row__review-badge"
+        >review</v-chip>
       </div>
       <div
         v-if="hasDescription"
@@ -113,7 +125,7 @@ function toggleExpanded() {
         </span>
       </div>
       <div
-        v-if="expanded && hasContext"
+        v-if="hasContext"
         class="todo-row__context"
         v-html="renderBlock(todo.contextMd!)"
       />
@@ -166,106 +178,103 @@ function toggleExpanded() {
 .todo-row {
   display: grid;
   grid-template-columns: 32px 1fr auto auto;
+  align-items: start;
   gap: 12px;
-  padding: 10px 16px;
+  padding: 14px 20px;
   border-bottom: 1px solid rgba(var(--v-theme-on-surface), 0.06);
   cursor: default;
   transition: background-color 120ms ease;
 }
-.todo-row:hover {
-  background-color: rgba(var(--v-theme-on-surface), 0.03);
-}
-.todo-row--yours {
-  box-shadow: inset 3px 0 0 0 rgb(var(--v-theme-primary));
-}
+.todo-row--expandable { cursor: pointer; }
+.todo-row--expandable:hover { background-color: rgba(var(--v-theme-on-surface), 0.03); }
+.todo-row--yours { box-shadow: inset 3px 0 0 0 rgb(var(--v-theme-primary)); }
 .todo-row--checkpoint {
-  background-color: rgba(var(--v-theme-on-surface), 0.04);
-  font-size: 12px;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: rgba(var(--v-theme-on-surface), 0.65);
+  background-color: rgba(var(--v-theme-primary), 0.05);
+  box-shadow: inset 3px 0 0 0 rgba(var(--v-theme-primary), 0.5);
 }
-.todo-row__status {
-  padding-top: 2px;
-}
-.todo-row__main {
-  min-width: 0;
-}
+.todo-row--checkpoint .todo-row__title { color: rgb(var(--v-theme-primary)); font-weight: 600; }
+.todo-row--checkpoint .todo-row__seq   { color: rgba(var(--v-theme-primary), 0.55); }
+.todo-row__status { padding-top: 3px; }
+.todo-row__main   { min-width: 0; }
+
 .todo-row__title {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
   font-size: 14.5px;
   font-weight: 500;
   line-height: 1.4;
   color: rgb(var(--v-theme-on-surface));
 }
 .todo-row__seq {
-  display: inline-block;
   font-variant-numeric: tabular-nums;
-  color: rgba(var(--v-theme-on-surface), 0.4);
-  margin-right: 8px;
+  color: rgba(var(--v-theme-on-surface), 0.38);
   font-weight: 400;
+  font-size: 13px;
+  flex-shrink: 0;
 }
+.todo-row__review-badge { margin-left: 2px; }
 .todo-row__description {
   margin-top: 4px;
   font-size: 13.5px;
-  color: rgba(var(--v-theme-on-surface), 0.7);
-  line-height: 1.45;
+  color: rgba(var(--v-theme-on-surface), 0.65);
+  line-height: 1.5;
   display: -webkit-box;
   -webkit-line-clamp: 1;
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
-.todo-row__description--expanded {
-  -webkit-line-clamp: unset;
-}
+.todo-row__description--expanded { -webkit-line-clamp: unset; }
 .todo-row__locations {
-  margin-top: 6px;
+  margin-top: 8px;
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
+  gap: 5px;
 }
 .todo-row__location {
   font-family: 'SF Mono', Menlo, Consolas, monospace;
-  font-size: 11.5px;
-  padding: 1px 6px;
-  border-radius: 3px;
-  background-color: rgba(var(--v-theme-on-surface), 0.06);
-  color: rgba(var(--v-theme-on-surface), 0.75);
+  font-size: 11px;
+  padding: 2px 7px;
+  border-radius: 4px;
+  background-color: rgba(var(--v-theme-on-surface), 0.07);
+  color: rgba(var(--v-theme-on-surface), 0.7);
+  border: 1px solid rgba(var(--v-theme-on-surface), 0.07);
 }
 .todo-row__location-more {
   font-size: 11.5px;
-  color: rgba(var(--v-theme-on-surface), 0.5);
+  color: rgba(var(--v-theme-on-surface), 0.45);
   align-self: center;
 }
+
+/*
+ * Left-border accent (not a box) — context flows from the row
+ * rather than feeling like a detached card.
+ */
 .todo-row__context {
-  margin-top: 10px;
-  padding: 10px 12px;
-  border-radius: 6px;
-  background-color: rgba(var(--v-theme-on-surface), 0.04);
-  font-size: 13.5px;
-  line-height: 1.55;
-}
-.todo-row__context :deep(code) {
-  font-family: 'SF Mono', Menlo, Consolas, monospace;
-  font-size: 0.9em;
-  padding: 1px 4px;
-  border-radius: 3px;
-  background-color: rgba(var(--v-theme-on-surface), 0.08);
-}
-.todo-row__title :deep(code) {
-  font-family: 'SF Mono', Menlo, Consolas, monospace;
-  font-size: 0.85em;
-  padding: 1px 4px;
-  border-radius: 3px;
-  background-color: rgba(var(--v-theme-on-surface), 0.08);
-}
-.todo-row__repo,
-.todo-row__assignee {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.todo-row__repo-empty {
-  color: rgba(var(--v-theme-on-surface), 0.35);
+  margin-top: 12px;
+  padding-left: 14px;
+  border-left: 2px solid rgba(var(--v-theme-on-surface), 0.14);
   font-size: 13px;
+  line-height: 1.65;
+  color: rgba(var(--v-theme-on-surface), 0.75);
 }
+.todo-row__context :deep(ul),
+.todo-row__context :deep(ol)          { margin: 0; padding-left: 18px; }
+.todo-row__context :deep(li)          { margin-top: 5px; }
+.todo-row__context :deep(li:first-child) { margin-top: 0; }
+.todo-row__context :deep(p)           { margin: 0 0 6px; }
+/* Shared monospace token for inline code in context and title */
+.todo-row__context :deep(code),
+.todo-row__title   :deep(code) {
+  font-family: 'SF Mono', Menlo, Consolas, monospace;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background-color: rgba(var(--v-theme-on-surface), 0.09);
+}
+.todo-row__context :deep(code) { font-size: 0.88em; color: rgba(var(--v-theme-on-surface), 0.9); }
+.todo-row__title   :deep(code) { font-size: 0.82em; }
+.todo-row__repo,
+.todo-row__assignee { display: flex; align-items: center; gap: 8px; padding-top: 2px; }
+.todo-row__repo-empty { color: rgba(var(--v-theme-on-surface), 0.3); font-size: 13px; }
 </style>
