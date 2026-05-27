@@ -32,7 +32,6 @@ Architecture:
 """
 
 import uuid
-from typing import cast
 
 import structlog
 from cachetools import TTLCache
@@ -55,6 +54,17 @@ logger = structlog.get_logger(__name__)
 
 # TTL cache: one entry per org, 5-minute expiry
 _cache: TTLCache[str, TreeData] = TTLCache(maxsize=64, ttl=300)
+
+
+def invalidate_tree_cache(org_id: uuid.UUID) -> None:
+    """Drop the cached TreeData for ``org_id`` so the next dashboard read rebuilds it.
+
+    Called after events that mutate the data the tree visualizes
+    (scan completion, repo registration, etc.) so newly-discovered
+    features and leaves surface without waiting for the 5-minute TTL.
+    Safe to call when no entry exists.
+    """
+    _cache.pop(str(org_id), None)
 
 
 async def get_tree_data(
@@ -89,7 +99,7 @@ async def get_tree_data(
     """
     cache_key = str(org_id)
     if not refresh and cache_key in _cache:
-        return cast(TreeData, _cache[cache_key])
+        return _cache[cache_key]
 
     tree = TreeData(org_id=str(org_id))
 
