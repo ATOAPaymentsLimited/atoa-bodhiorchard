@@ -25,14 +25,21 @@ from typing import Any
 
 import structlog
 
-from app.models.bud import BUDDocument
+from app.models.bud import BUDDocument, BUDTimelineEventType
 from app.models.bud_agent_task import BUDAgentTask
 from app.models.bud_feature_link import BUDFeatureLinkSource
 from app.models.bud_version import BUDEditSource
 from app.repositories import bud_version as bud_version_repo
+from app.repositories.bud import BUDRepository
 from app.repositories.bud_feature_link import BUDFeatureLinkRepository
+from app.repositories.feature_learning import FeatureLearningRepository
+from app.repositories.tracked_repository import TrackedRepoRepository
+from app.services.bud_estimation import estimate_bud_dates
 from app.services.bud_timeline import record_event
+from app.services.embedding_service import embedding_service
+from app.services.event_bus import publish
 from app.services.json_parser import parse_json_response, strip_insight_blocks
+from app.services.notification_service import send_lifecycle_notification
 
 logger = structlog.get_logger(__name__)
 
@@ -96,18 +103,25 @@ async def handle_prd_result(
     TechPlanner, Code Reviewer, Tester) inherit the grounding.
     """
     linked_count = await _persist_pm_linked_features(bud_id, org_id, output, db)
+    # Flush the linked-feature inserts to the outer transaction proper
+    # before opening the savepoint below — otherwise an autoflush triggered
+    # inside the savepoint would scope those inserts to it, and an
+    # estimation failure would roll the links back too.
+    await db.flush()
 
-    # Generate initial delivery estimates now that PRD content exists
-    try:
-        from app.repositories.bud import BUDRepository
-        from app.services.bud_estimation import estimate_bud_dates
-
-        bud_repo = BUDRepository(db, org_id=org_id)
-        bud = await bud_repo.get_by_id(bud_id)
-        if bud:
-            await estimate_bud_dates(db, org_id, bud, trigger="prd_completed")
-    except Exception:
-        logger.warning("estimation_failed_after_prd", bud_id=str(bud_id))
+    # Generate initial delivery estimates now that PRD content exists.
+    # Wrap in a SAVEPOINT so a query failure inside the estimator only
+    # rolls back the estimator's own writes — the outer transaction stays
+    # alive, its prior writes survive, and the next log_agent_activity
+    # call doesn't trip InFailedSQLTransactionError.
+    bud_repo = BUDRepository(db, org_id=org_id)
+    bud = await bud_repo.get_by_id(bud_id)
+    if bud is not None:
+        try:
+            async with db.begin_nested():
+                await estimate_bud_dates(db, org_id, bud, trigger="prd_completed")
+        except Exception:
+            logger.warning("estimation_failed_after_prd", bud_id=str(bud_id), exc_info=True)
 
     return {
         "section": "requirements_md",
@@ -254,9 +268,6 @@ async def handle_tech_arch_result(
     We parse that JSON to determine which repos actually need changes,
     then strip the JSON block before storing the markdown.
     """
-    from app.repositories.bud import BUDRepository
-    from app.repositories.tracked_repository import TrackedRepoRepository
-
     bud_repo = BUDRepository(db, org_id=org_id)
     bud = await bud_repo.get_by_id(bud_id)
     if bud:
@@ -292,17 +303,20 @@ async def handle_tech_arch_result(
         # todos crystallize from the *approved* plan at the DEVELOPMENT-phase
         # transition — see services/bud_development.on_bud_development_started.
 
-        # Re-estimate with richer context (now has tech spec + impacted repos)
+        # Re-estimate with richer context (now has tech spec + impacted repos).
+        # Wrap in a SAVEPOINT so a query failure inside the estimator only
+        # rolls back the estimator's own writes — the outer transaction
+        # stays alive (preserving the tech_spec_md / impacted_repos writes
+        # flushed just above), and the next log_agent_activity call doesn't
+        # trip InFailedSQLTransactionError. Same-session also means the
+        # estimator sees the in-memory bud writes without a refetch + mirror.
         try:
-            from app.services.bud_estimation import estimate_bud_dates
-
-            await estimate_bud_dates(db, org_id, bud, trigger="tech_arch_completed")
+            async with db.begin_nested():
+                await estimate_bud_dates(db, org_id, bud, trigger="tech_arch_completed")
         except Exception:
-            logger.warning("estimation_failed_after_tech_arch", bud_id=str(bud_id))
+            logger.warning("estimation_failed_after_tech_arch", bud_id=str(bud_id), exc_info=True)
 
     if bud and bud.assignee_id:
-        from app.services.notification_service import send_lifecycle_notification
-
         bud_ref = f"BUD-{bud.bud_number:03d}"
         send_lifecycle_notification(
             org_id=str(org_id),
@@ -476,14 +490,20 @@ async def handle_testing_result(
             f"- **{manual_count}** manual test cases\n\n"
             f"{parsed_data['test_execution_plan']}"
         )
-        # Re-estimate with QA test case context
-        try:
-            from app.services.bud_estimation import estimate_bud_dates
-
-            await estimate_bud_dates(db, org_id, bud, trigger="testing_completed")
-        except Exception:
-            logger.warning("estimation_failed_after_testing", bud_id=str(bud_id))
+        # Flush the QA writes to the outer transaction proper BEFORE the
+        # savepoint — otherwise an autoflush triggered inside the savepoint
+        # would scope them to it, and an estimation failure would roll the
+        # qa_* / test_plan_md back too.
         await db.flush()
+        # Re-estimate with QA test case context. Wrap in a SAVEPOINT so a
+        # query failure inside the estimator only rolls back the estimator's
+        # own writes — the QA writes above and the subsequent notification
+        # all stay on the live outer transaction.
+        try:
+            async with db.begin_nested():
+                await estimate_bud_dates(db, org_id, bud, trigger="testing_completed")
+        except Exception:
+            logger.warning("estimation_failed_after_testing", bud_id=str(bud_id), exc_info=True)
 
     if bud and bud.assignee_id:
         from app.services.notification_service import send_lifecycle_notification
@@ -790,3 +810,75 @@ def _dict_plan_to_markdown(plan: dict[str, Any]) -> str:
             lines.append(str(plan))
 
     return "\n".join(lines)
+
+
+# ── Learning Agent ───────────────────────────────────────────────────
+
+
+# How much of the recap is fed into the embedding model. Matches the
+# convention used by planned_feature creation in feature_lifecycle so
+# both pgvector consumers see comparable input lengths.
+_LEARNING_EMBED_CHARS = 2_000
+
+
+async def handle_learning_result(
+    bud_id: uuid_mod.UUID,
+    org_id: uuid_mod.UUID,
+    output: str,
+    task: BUDAgentTask,
+    db: Any,
+) -> dict[str, Any] | None:
+    """Post-close Learning Agent result handler.
+
+    The LLM's raw output IS the markdown recap — no JSON-fence parsing,
+    no section splitting. We strip the explanatory ``★ Insight`` blocks
+    that ``learning`` and ``explanatory`` output styles can leak (see
+    project_claude_subprocess_isolation memory), embed the first chunk
+    for future cross-BUD similarity lookups, and persist both onto the
+    BUD's FeatureLearning row. A timeline event and the per-BUD
+    activity topic finish the loop so the Learnings tab refreshes live.
+    """
+    stripped_text, _had_insights = strip_insight_blocks(output)
+    recap_md = stripped_text.strip()
+    if not recap_md:
+        logger.warning("learning_result_empty_output", bud_id=str(bud_id))
+        return {"section": "retrospective_md", "output_length": 0}
+
+    embedding: list[float] | None = None
+    try:
+        embedding = await embedding_service.embed(recap_md[:_LEARNING_EMBED_CHARS])
+    except Exception:
+        logger.warning("learning_result_embed_failed", bud_id=str(bud_id), exc_info=True)
+
+    repo = FeatureLearningRepository(db, org_id=org_id)
+    row = await repo.set_retrospective(
+        bud_id,
+        retrospective_md=recap_md,
+        embedding=embedding,
+    )
+    if row is None:
+        logger.warning(
+            "learning_result_no_feature_learning_row",
+            bud_id=str(bud_id),
+            note="bud_metrics.compute_and_persist should have created the row first",
+        )
+        return {"section": "retrospective_md", "output_length": len(recap_md)}
+
+    await record_event(
+        db,
+        org_id,
+        bud_id,
+        BUDTimelineEventType.LEARNING_RECORDED.value,
+        detail={
+            "char_count": len(recap_md),
+            "task_id": str(task.id),
+        },
+    )
+    publish(
+        f"bud:{bud_id}:activity",
+        {
+            "event_type": BUDTimelineEventType.LEARNING_RECORDED.value,
+            "char_count": len(recap_md),
+        },
+    )
+    return {"section": "retrospective_md", "output_length": len(recap_md)}

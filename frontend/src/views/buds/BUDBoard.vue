@@ -319,6 +319,20 @@
                   inset
                 />
               </div>
+              <AppCallout
+                v-if="autoGeneratePhases.closed === false"
+                variant="warning"
+                eyebrow="Learning recap disabled"
+                icon="mdi-alert-outline"
+                class="mb-4"
+              >
+                Without the post-close recap, this BUD's per-phase actuals
+                still feed the velocity rollup that powers future
+                estimates — but you lose the written retrospective and
+                the trend signal that recap embeddings provide to similar
+                BUDs. Leave this on unless you're explicitly using your
+                own LLM workflow for retrospectives.
+              </AppCallout>
               <v-progress-circular
                 v-if="skillsStore.loading"
                 indeterminate
@@ -375,8 +389,10 @@
 <script setup lang="ts">
 import { computed, ref, onMounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
+import AppCallout from '@/components/common/AppCallout.vue'
 import { useBUDStore } from '@/stores/bud'
 import { useAgentSkillsStore, type AgentType, type AgentSkill } from '@/stores/agentSkills'
+import { useSettingsStore } from '@/stores/settings'
 import { BUD_STATUS_LABELS, BUD_STATUS_COLORS, BUD_PRIORITIES } from '@/types'
 import type { BUDStatus, BUDPriority } from '@/types'
 import { usePhaseOrder } from '@/composables/usePhaseOrder'
@@ -399,6 +415,7 @@ const PRIORITY_OPTIONS = BUD_PRIORITIES.map(p => ({ label: p, value: p }))
 const router = useRouter()
 const budStore = useBUDStore()
 const skillsStore = useAgentSkillsStore()
+const settingsStore = useSettingsStore()
 
 const nameFilter = ref('')
 // Sentinel value (string, not null) for the "Unassigned" option — v-select's
@@ -484,6 +501,7 @@ const advancedStages: StageConfig[] = [
   { value: 'design' as BUDStatus, label: 'Design', agentType: 'design' },
   { value: 'tech_arch' as BUDStatus, label: 'Tech plan', agentType: 'techPlan' },
   { value: 'testing' as BUDStatus, label: 'Test plan', agentType: 'testPlan' },
+  { value: 'closed' as BUDStatus, label: 'Learning recap', agentType: 'learning' },
 ]
 
 interface StageSkillOption { id: string; label: string; isDefault: boolean }
@@ -506,11 +524,12 @@ function defaultSkillIdForAgent(agentType: AgentType): string | null {
 function prefillStageDefaults(): void {
   for (const stage of advancedStages) {
     stageSkillPicks.value[stage.value] = defaultSkillIdForAgent(stage.agentType)
-    // Default each phase to ON for new BUDs — user feedback was that
-    // the previous all-skip default required clicking through Advanced
-    // settings just to get the in-flight default behaviour. Users who
-    // want External-LLM mode can still flip individual switches OFF
-    // before creating, or change them later via the AI skills dialog.
+    // Default every phase ON for new BUDs (including the post-close
+    // Learning recap). The recap costs a Claude API call per close,
+    // but skipping it loses the calibration signal the estimator
+    // depends on, so the right default is "on" with a visible warning
+    // shown next to the switch when the user flips it off (see the
+    // closed-stage warning callout in the template).
     if (autoGeneratePhases.value[stage.value] === undefined) {
       autoGeneratePhases.value[stage.value] = true
     }
@@ -539,6 +558,10 @@ watch(
 
 onMounted(() => {
   budStore.fetchBUDs()
+  // usePhaseOrder() reads budStages.uatEnabled to decide whether the UAT
+  // column shows. Without this fetch a cold page load uses the default
+  // (UAT enabled) regardless of what the org has saved.
+  if (!settingsStore.connectionsLoaded) settingsStore.fetchConnections()
 })
 
 function openBUD(id: string): void {
