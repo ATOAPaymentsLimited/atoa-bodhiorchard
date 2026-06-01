@@ -1,0 +1,77 @@
+name: Lockfile guard
+
+# Blocks accidental wholesale regenerations of frontend/package-lock.json.
+#
+# A regenerate (rm package-lock.json && npm install) re-resolves every
+# caret-ranged transitive dep against the npm registry's current state,
+# silently floating versions that nobody reviewed. That class of change
+# caused a production outage on Jun 1 (Rollup 4.60 -> 4.61, PlayCanvas
+# 2.18 -> 2.19) and three earlier silent drifts on May 21, May 22, and
+# June 1.
+#
+# Signature of a regenerate: huge churn in package-lock.json with zero
+# change in package.json. This guard fails any PR matching that shape
+# unless the author explicitly opts in via the bypass label.
+#
+# All untrusted inputs (pull_request fields, labels) are read via env:
+# bindings and never interpolated directly into shell, per the safe
+# pattern documented at
+# https://docs.github.com/en/actions/security-guides/security-hardening-for-github-actions
+
+on:
+  pull_request:
+    paths:
+      - 'frontend/package-lock.json'
+      - 'frontend/package.json'
+
+jobs:
+  lockfile-guard:
+    name: Block accidental lockfile regenerates
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Check for regenerate-shaped diff
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          LABELS_JSON: ${{ toJson(github.event.pull_request.labels.*.name) }}
+        run: |
+          set -euo pipefail
+
+          if echo "$LABELS_JSON" | grep -q '"allow-lockfile-regenerate"'; then
+            echo "Bypass label 'allow-lockfile-regenerate' is set; guard skipped."
+            exit 0
+          fi
+
+          MERGE_BASE=$(git merge-base "$BASE_SHA" "$HEAD_SHA")
+
+          lock_lines=$(git diff --numstat "$MERGE_BASE" "$HEAD_SHA" -- frontend/package-lock.json \
+            | awk '{ s += $1 + $2 } END { print s + 0 }')
+          pkg_lines=$(git diff --numstat "$MERGE_BASE" "$HEAD_SHA" -- frontend/package.json \
+            | awk '{ s += $1 + $2 } END { print s + 0 }')
+
+          echo "frontend/package-lock.json diff: $lock_lines lines"
+          echo "frontend/package.json     diff: $pkg_lines lines"
+
+          THRESHOLD=1500
+
+          if [ "$lock_lines" -gt "$THRESHOLD" ] && [ "$pkg_lines" -eq 0 ]; then
+            echo "::error::package-lock.json changed by ${lock_lines} lines but package.json is unchanged."
+            echo "::error::This is the signature of a wholesale lockfile regenerate, which silently"
+            echo "::error::re-rolls every transitive dependency and has broken production before."
+            echo "::error::"
+            echo "::error::If this came from a merge conflict, the right resolution is:"
+            echo "::error::  1) git checkout --theirs frontend/package-lock.json"
+            echo "::error::  2) cd frontend && npm install"
+            echo "::error::  3) git add frontend/package-lock.json && git commit"
+            echo "::error::"
+            echo "::error::If you genuinely intend to regenerate (e.g. a major upgrade), add the"
+            echo "::error::label 'allow-lockfile-regenerate' to this PR and re-run the check."
+            exit 1
+          fi
+
+          echo "OK: lockfile change is proportionate or accompanied by package.json edits."
