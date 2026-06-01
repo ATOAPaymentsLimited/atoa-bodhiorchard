@@ -34,6 +34,7 @@ from app.api.v1.bud_todos import router as todos_router
 from app.api.v1.bud_versions import router as versions_router
 from app.api.v1.bud_workflows import router as workflows_router
 from app.core.deps import get_current_user, get_db, get_user_permissions, require_permissions
+from app.database import AsyncSessionLocal
 from app.models.bud import (
     BUDDesignStatus,
     BUDDocument,
@@ -53,9 +54,11 @@ from app.repositories.bud_agent_task import BUDAgentTaskRepository
 from app.repositories.bud_section_session import BUDSectionSessionRepository
 from app.repositories.bud_timeline import BUDTimelineRepository
 from app.repositories.bug import BugRepository
+from app.repositories.feature_learning import FeatureLearningRepository
 from app.schemas.bud import (
     BUDAgentTaskRead,
     BUDCreate,
+    BUDLearningRead,
     BUDListItem,
     BUDRead,
     BUDUpdate,
@@ -92,6 +95,7 @@ from app.services.bud_agent_trigger import (
 )
 from app.services.bud_assignment_actions import assign_bud, unassign_bud
 from app.services.bud_edit_policy import assert_section_editable
+from app.services.bud_estimation import estimate_bud_dates
 from app.services.bud_timeline import record_event
 from app.services.job_queue import JOB_BUD_AGENT, create_job
 
@@ -222,6 +226,14 @@ async def _bud_response(
             else None,
             "metadata": latest_failure.metadata_ or {},
         }
+
+    # ``has_learning`` is a cheap tab-visibility flag: the BUD detail
+    # page hides the "Learnings" tab when no feature_learning row has a
+    # retrospective yet. The full markdown is fetched lazily via
+    # GET /buds/{id}/learning so the BUD list payload stays small.
+    learning_row = await FeatureLearningRepository(db, org_id=org_id).get_for_bud(bud.id)
+    bud_data.has_learning = bool(learning_row and learning_row.retrospective_md)
+
     return bud_data
 
 
@@ -500,6 +512,39 @@ async def set_stage_skill_overrides(
         count=len(body),
     )
     return body
+
+
+@router.get(
+    "/{bud_id}/learning",
+    response_model=BUDLearningRead,
+    dependencies=[Depends(require_permissions("buds:view"))],
+)
+async def get_bud_learning(
+    bud_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> BUDLearningRead:
+    """Return the post-close retrospective for this BUD.
+
+    Drives the BUD detail "Learnings" tab. Returns 404 when no
+    FeatureLearning row exists yet — i.e. the BUD hasn't closed, the
+    Learning Agent hasn't run, or the user opted out via
+    ``auto_generate_phases.closed = false``. The FE gates tab
+    visibility on ``BUDRead.has_learning`` so this endpoint is only
+    called after the flag flips true.
+    """
+    bud_repo = BUDRepository(db, org_id=current_user.org_id)
+    bud = await bud_repo.get_by_id(bud_id)
+    if bud is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="BUD not found")
+
+    learning = await FeatureLearningRepository(db, org_id=current_user.org_id).get_for_bud(bud_id)
+    if learning is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No learning recorded for this BUD yet",
+        )
+    return BUDLearningRead.model_validate(learning)
 
 
 # Status transitions QA owns directly via PATCH. Matches the manual-testing
@@ -1126,13 +1171,8 @@ async def _bg_estimate(
     actor_name: str,
 ) -> None:
     """Run estimation in the background with its own DB session."""
-    from app.database import AsyncSessionLocal
-    from app.services.bud_estimation import estimate_bud_dates
-
     try:
         async with AsyncSessionLocal() as db:
-            from app.repositories.bud import BUDRepository
-
             bud_repo = BUDRepository(db, org_id=org_id)
             bud = await bud_repo.get_by_id(bud_id)
             if bud is None:
@@ -1274,23 +1314,29 @@ async def override_code_review(
             bud_id=str(bud_id),
         )
 
-    # Refresh estimates so dashboards reflect the new phase.
+    # Refresh estimates so dashboards reflect the new phase. Run in a
+    # fresh session so a DB failure inside the estimator can't poison
+    # the request session — the trailing _bud_response below queries
+    # the same session and would otherwise 500 with the confusing
+    # InFailedSQLTransactionError instead of the real cause.  The
+    # status transition was already committed above, so a fresh
+    # refetch sees status=testing without any mirroring.
     try:
-        from app.services.bud_estimation import estimate_bud_dates
-
-        refreshed_for_est = await bud_repo.get_by_id(bud_id)
-        if refreshed_for_est is not None:
-            await estimate_bud_dates(
-                db,
-                current_user.org_id,
-                refreshed_for_est,
-                trigger="code_review_override",
-            )
-            await db.commit()
+        async with AsyncSessionLocal() as est_db:
+            est_bud = await BUDRepository(est_db, org_id=current_user.org_id).get_by_id(bud_id)
+            if est_bud is not None:
+                await estimate_bud_dates(
+                    est_db,
+                    current_user.org_id,
+                    est_bud,
+                    trigger="code_review_override",
+                )
+                await est_db.commit()
     except Exception:
         logger.warning(
             "code_review_override_estimation_failed",
             bud_id=str(bud_id),
+            exc_info=True,
         )
 
     refreshed = await bud_repo.get_by_id(bud_id)
