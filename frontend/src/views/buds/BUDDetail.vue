@@ -369,9 +369,12 @@
               <v-tabs-window-item v-if="uatStageEnabled" value="uat">
                 <BUDReleaseStagePanel
                   :bud-id="bud.id"
+                  :bud-number="bud.bud_number"
                   stage="uat"
                   :has-stage-branch-configured="hasUatBranchConfigured"
                   :impacted-repos="bud.impacted_repos"
+                  :branch-overrides="bud.branch_overrides"
+                  @refresh-bud="budStore.fetchBUD(bud.id)"
                 />
               </v-tabs-window-item>
 
@@ -379,9 +382,12 @@
               <v-tabs-window-item value="prod">
                 <BUDReleaseStagePanel
                   :bud-id="bud.id"
+                  :bud-number="bud.bud_number"
                   stage="prod"
                   :has-stage-branch-configured="hasMainBranchConfigured"
                   :impacted-repos="bud.impacted_repos"
+                  :branch-overrides="bud.branch_overrides"
+                  @refresh-bud="budStore.fetchBUD(bud.id)"
                 />
               </v-tabs-window-item>
 
