@@ -42,7 +42,7 @@
     "typescript": "^5.3.3",
     "vite": "^5.1.0",
     "vite-plugin-vuetify": "^2.0.0",
-    "vite-ssg": "^0.23.8",
+    "vite-ssg": "^28.3.0",
     "vitest": "^1.6.1",
     "vue-tsc": "^2.0.0"
   }
