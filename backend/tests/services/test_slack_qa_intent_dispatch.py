@@ -35,6 +35,7 @@ import pytest
 
 from app.models.feature_qa_session import FeatureQAStatus
 from app.services import slack_client, slack_feature_qa
+from app.services.claude_errors import ClaudeErrorCode
 from app.services.slack_feature_qa import (
     _SKILL_BY_INTENT,
     _TOOLS_BY_INTENT,
@@ -63,9 +64,7 @@ def _silence_slack_posts(monkeypatch: Any) -> dict[str, list[str]]:
     """Capture chat_post_message calls without hitting Slack."""
     posts: list[tuple[str, str | None]] = []
 
-    async def _capture(
-        token: str, channel: str, text: str, **kw: Any
-    ) -> dict[str, Any]:
+    async def _capture(token: str, channel: str, text: str, **kw: Any) -> dict[str, Any]:
         posts.append((text, kw.get("thread_ts")))
         return {"ok": True}
 
@@ -236,3 +235,93 @@ async def test_no_drill_down_when_candidates_are_feature_only(
 
     conversation = captured_runs[0]["prompt"].split("## Conversation", 1)[-1]
     assert "[HINT_BUD_NUMBER]" not in conversation
+
+
+# ── 4. Soft-fallback when the specialist can't commit ────────────────
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "soft_code",
+    [ClaudeErrorCode.MAX_TURNS, ClaudeErrorCode.TIMEOUT],
+)
+async def test_soft_fallback_returns_not_found_message_not_errored(
+    soft_code: ClaudeErrorCode,
+    monkeypatch: Any,
+    _silence_slack_posts: dict[str, list[tuple[str, str | None]]],
+) -> None:
+    """``MAX_TURNS`` and ``TIMEOUT`` both mean "the model couldn't commit
+    within its budget" on a fact-lookup specialist — neither is a server
+    crash. Surface the not_found copy, keep the session AWAITING_USER
+    so the user can clarify in the same thread.
+
+    Asserts by reply *identity* (against ``slack_feature_qa`` module
+    constants), not substring on the copy, so copy edits don't break
+    this regression pin."""
+
+    async def _timeline_intent(**kw: Any) -> QaIntent:
+        return QaIntent.TIMELINE
+
+    monkeypatch.setattr(slack_feature_qa, "classify_qa_intent", _timeline_intent)
+
+    async def _soft_fail(*, prompt: str, working_dir: str, config: Any) -> Any:
+        return MagicMock(
+            success=False,
+            output="",
+            error="soft fallback",
+            error_code=soft_code,
+        )
+
+    monkeypatch.setattr(slack_feature_qa, "run_claude_code", _soft_fail)
+
+    session = _make_session()
+    await _run_qa_agent(
+        MagicMock(), MagicMock(id=uuid.uuid4()), "bot-token", session, thread_messages=None
+    )
+
+    assert session.status == FeatureQAStatus.AWAITING_USER
+
+    texts = [text for text, _ in _silence_slack_posts["posts"]]
+    assert slack_feature_qa._BUD_NOT_FOUND_REPLY in texts, (
+        f"expected the not_found reply constant, got posts={texts!r}"
+    )
+    assert slack_feature_qa._GENERIC_FAILURE_REPLY not in texts, (
+        "must NOT post the generic server-error reply on a soft fallback"
+    )
+
+
+@pytest.mark.asyncio
+async def test_hard_error_still_marks_session_errored(
+    monkeypatch: Any,
+    _silence_slack_posts: dict[str, list[tuple[str, str | None]]],
+) -> None:
+    """``BINARY_MISSING`` is a real server-side problem — the dispatcher
+    must keep posting the generic reply and flipping the session to
+    ERRORED so it shows up loudly in logs and metrics. Pins the
+    not-soft side of the ``_SOFT_FALLBACK_ERROR_CODES`` split."""
+
+    async def _timeline_intent(**kw: Any) -> QaIntent:
+        return QaIntent.TIMELINE
+
+    monkeypatch.setattr(slack_feature_qa, "classify_qa_intent", _timeline_intent)
+
+    async def _hard_fail(*, prompt: str, working_dir: str, config: Any) -> Any:
+        return MagicMock(
+            success=False,
+            output="",
+            error="binary missing",
+            error_code=ClaudeErrorCode.BINARY_MISSING,
+        )
+
+    monkeypatch.setattr(slack_feature_qa, "run_claude_code", _hard_fail)
+
+    session = _make_session()
+    await _run_qa_agent(
+        MagicMock(), MagicMock(id=uuid.uuid4()), "bot-token", session, thread_messages=None
+    )
+
+    assert session.status == FeatureQAStatus.ERRORED
+
+    texts = [text for text, _ in _silence_slack_posts["posts"]]
+    assert slack_feature_qa._GENERIC_FAILURE_REPLY in texts
+    assert slack_feature_qa._BUD_NOT_FOUND_REPLY not in texts
