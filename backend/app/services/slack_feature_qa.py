@@ -43,6 +43,7 @@ from app.repositories.feature import FeatureRepository
 from app.repositories.feature_qa_session import FeatureQASessionRepository
 from app.repositories.user import UserRepository
 from app.services import slack_client
+from app.services.claude_errors import ClaudeErrorCode
 from app.services.claude_runner import (
     NO_REPO_CONTEXT,
     ClaudeRunnerConfig,
@@ -107,6 +108,24 @@ _SPECIALIST_MAX_TURNS_FLOOR = 2
 _SPECIALIST_TIMEOUT_SECONDS = 60
 
 _ACK_REPLY = "Happy to help — ask anything else about this feature."
+
+# Reply copy. Extracted as module constants so the tests can assert by
+# identity rather than substring — copy edits don't break behaviour
+# pins, and behaviour regressions don't hide behind copy churn.
+_GENERIC_FAILURE_REPLY = "⚠️ Couldn't look that up right now. Please try again shortly."
+_PARSE_FAILURE_REPLY = "⚠️ Couldn't parse that. Try rephrasing your question."
+_BUD_NOT_FOUND_REPLY = (
+    "I couldn't find a BUD matching that. React 🧠 on the original"
+    " message to start intake, or reply with a BUD number / title."
+)
+
+# Soft-fallback error codes for specialist runs. ``MAX_TURNS`` and
+# ``TIMEOUT`` both mean "the model couldn't commit within its budget"
+# from the user's perspective on a fact-lookup specialist — neither
+# is a server crash. Surface them as ``not_found`` and keep the
+# session ``AWAITING_USER`` so the next reply re-enters cleanly.
+# ``BINARY_MISSING`` / ``UNKNOWN`` stay on the hard-error path.
+_SOFT_FALLBACK_ERROR_CODES = frozenset({ClaudeErrorCode.MAX_TURNS, ClaudeErrorCode.TIMEOUT})
 
 
 async def start_feature_qa(
@@ -252,7 +271,7 @@ async def _run_qa_agent(
         await slack_client.chat_post_message(
             bot_token,
             session.channel,
-            "⚠️ Couldn't look that up right now. Please try again shortly.",
+            _GENERIC_FAILURE_REPLY,
             thread_ts=session.thread_ts,
         )
         session.status = FeatureQAStatus.ERRORED
@@ -289,17 +308,38 @@ async def _run_qa_agent(
         await slack_client.chat_post_message(
             bot_token,
             session.channel,
-            "⚠️ Couldn't look that up right now. Please try again shortly.",
+            _GENERIC_FAILURE_REPLY,
             thread_ts=session.thread_ts,
         )
         session.status = FeatureQAStatus.ERRORED
         return
 
     if not result.success:
+        # MAX_TURNS / TIMEOUT mean "the model couldn't commit within its
+        # budget" — for a fact-lookup specialist that's equivalent to
+        # "no clear BUD found", not a server crash. Surface not_found
+        # and keep the session AWAITING_USER so the next reply re-enters
+        # cleanly. Hard errors (binary missing, unknown returncode) keep
+        # the ERRORED path so they show up loudly in logs and metrics.
+        if result.error_code in _SOFT_FALLBACK_ERROR_CODES:
+            logger.info(
+                "feature_qa_specialist_soft_fallback",
+                session_id=str(session.id),
+                intent=intent.value,
+                error_code=result.error_code.value if result.error_code else None,
+            )
+            await slack_client.chat_post_message(
+                bot_token,
+                session.channel,
+                _BUD_NOT_FOUND_REPLY,
+                thread_ts=session.thread_ts,
+            )
+            return
+
         await slack_client.chat_post_message(
             bot_token,
             session.channel,
-            "⚠️ Couldn't look that up right now. Please try again shortly.",
+            _GENERIC_FAILURE_REPLY,
             thread_ts=session.thread_ts,
         )
         session.status = FeatureQAStatus.ERRORED
@@ -311,7 +351,7 @@ async def _run_qa_agent(
         await slack_client.chat_post_message(
             bot_token,
             session.channel,
-            "⚠️ Couldn't parse that. Try rephrasing your question.",
+            _PARSE_FAILURE_REPLY,
             thread_ts=session.thread_ts,
         )
         session.status = FeatureQAStatus.ERRORED
