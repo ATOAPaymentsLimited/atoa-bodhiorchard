@@ -16,7 +16,7 @@ import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import api from '@/services/api'
 import { extractApiError } from '@/utils/errors'
-import type { RepoBranchList, RepoInfo } from '@/types'
+import type { JobCreatedResponse, RepoBranchList, RepoInfo } from '@/types'
 import { GITHUB_APP_STATUS, isGitHubAppStatus, type GitHubAppStatus } from '@/types/connections'
 
 export interface ConnectionsState {
@@ -346,33 +346,22 @@ export const useSettingsStore = defineStore('settings', () => {
   // (knowing it should require reading the UI prompt, not introspection).
   const SKILL_RERUN_CONFIRMATION = 'WIPE AND RECOMPUTE SKILLS'
 
-  interface SkillRerunResult {
-    profilesDeleted: number
-    profilesUpserted: number
-    unmatchedEmails: number
-    reposWalked: number
-  }
-
   async function rerunSkillProfiles(
     confirmation: string,
-  ): Promise<SkillRerunResult | null> {
+  ): Promise<JobCreatedResponse | null> {
     error.value = null
     try {
-      // The endpoint walks every active repo synchronously; on a
-      // ~20-repo org with deep history it can take a minute or so.
-      // Override the default axios timeout so a slow first-time wipe
-      // doesn't abort the request mid-walk and leave the org in a
-      // partial state (the server-side transaction rolls back on a
-      // disconnected client). TODO: convert to the async-job pattern
-      // if any org's recompute regularly exceeds ~90s.
-      const { data } = await api.post<SkillRerunResult>(
+      // Returns 202 with { jobId }. The walk itself can take minutes
+      // on large orgs — well past any client/proxy idle window — so
+      // the handler runs in the background queue and the UI polls
+      // via useJobSocket. See app/services/job_skill_rerun.py.
+      const { data } = await api.post<JobCreatedResponse>(
         '/v1/skills/profiles/rerun',
         { confirmation: confirmation.trim(), wipe: true },
-        { timeout: 180_000 },
       )
       return data
     } catch (err) {
-      error.value = extractApiError(err, 'Failed to rerun skill profiles.')
+      error.value = extractApiError(err, 'Failed to start skill rerun.')
       return null
     }
   }
