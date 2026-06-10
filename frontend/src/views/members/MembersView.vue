@@ -41,7 +41,7 @@
     <!-- Header -->
     <div class="d-flex align-center justify-space-between mb-6">
       <div>
-        <div class="text-h5 font-weight-bold">Members</div>
+        <div class="text-h5 font-weight-bold bo-display">Members</div>
         <div class="d-flex align-center ga-3">
           <span class="text-body-2 text-medium-emphasis">
             {{ visibleMembers.length }} member{{ visibleMembers.length !== 1 ? 's' : '' }}
@@ -270,7 +270,7 @@
         v-for="role in store.roles"
         :key="role.id"
         color="surface"
-        variant="outlined"
+        border
         class="role-card"
       >
         <v-card-text class="pb-2">
