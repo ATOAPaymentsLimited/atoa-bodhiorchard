@@ -36,6 +36,57 @@ export const TRACK_LENGTH_M = 60
 export const ALLOWED_DISTANCES_M = [100, 200] as const
 export type AllowedDistanceM = typeof ALLOWED_DISTANCES_M[number]
 
+/**
+ * Physical arc length of the circuit loop, in metres. The loop is drawn
+ * ONCE at this size regardless of how many laps a race runs — so a 1-lap
+ * and a 2-lap race share an identically-sized course, the difference being
+ * how many times racers go around it.
+ *
+ * The race *distance* (the finish line fed to physics as `trackLengthM`,
+ * and the wire value `distanceM`) is `lapCount * LOOP_LENGTH_M`. At
+ * LOOP_LENGTH_M = 100 the two allowed distances {100, 200} map cleanly to
+ * {1, 2} laps, so all the existing 100/200 distance validation stays valid
+ * while the geometry is built from this single fixed length.
+ */
+export const LOOP_LENGTH_M = 100
+
+/**
+ * Lap counts the host may choose. Pairs with ALLOWED_DISTANCES_M through
+ * LOOP_LENGTH_M: lap k ⇄ distance k·LOOP_LENGTH_M. The setup dialog shows
+ * these as "1 lap" / "2 laps" but still sends `distanceM` on the wire, so
+ * the server/backend distance validators need no changes.
+ */
+export const ALLOWED_LAP_COUNTS = [1, 2] as const
+export type AllowedLapCount = typeof ALLOWED_LAP_COUNTS[number]
+
+/** Race distance (finish line) for a given lap count over the fixed loop. */
+export function lapCountToDistanceM(lapCount: number): number {
+  return lapCount * LOOP_LENGTH_M
+}
+
+/** Lap count implied by a race distance over the fixed loop. */
+export function distanceMToLapCount(distanceM: number): number {
+  return distanceM / LOOP_LENGTH_M
+}
+
+/**
+ * Human label for a race distance in laps — the single source of truth
+ * for the lap wording the dialog, leaderboard tabs, and race results all
+ * show, so "1 lap" / "2 laps" can never drift between surfaces.
+ */
+export function lapLabel(distanceM: number): string {
+  const laps = distanceMToLapCount(distanceM)
+  return `${laps} lap${laps === 1 ? '' : 's'}`
+}
+
+/**
+ * Track shapes the host may choose when creating a race. Shared between
+ * the frontend setup dialog and the multiplayer server validators for the
+ * same lock-step reason as ALLOWED_DISTANCES_M. On `circuit` the chosen
+ * distance becomes the lap circumference; physics is shape-agnostic.
+ */
+export const ALLOWED_TRACK_SHAPES = ['straight', 'circuit'] as const
+
 /** Inclusive bounds on participant count per race-v2 room. */
 export const MIN_RACERS = 2
 export const MAX_RACERS = 10
@@ -132,16 +183,17 @@ export const IDLE_REGEN_PER_S = 0.3
 
 // ─── Boost pads ─────────────────────────────
 //
-// Glowing strips painted across the track at fixed fractions of the race
-// distance. Crossing one grants a free speed burst — faster than a sprint
-// and with zero stamina drain. The skill expression is *not* sprinting
-// right before a pad: a tap-banked sprint window overlaps the boost and
-// wastes both stamina and the differential.
+// Glowing strips painted across the track at fixed fractions of the
+// PHYSICAL loop. Crossing one grants a free speed burst — faster than a
+// sprint and with zero stamina drain. The skill expression is *not*
+// sprinting right before a pad: a tap-banked sprint window overlaps the
+// boost and wastes both stamina and the differential. On a multi-lap race
+// each pad is a single physical strip seen — and fired — once per lap.
 
 /**
- * Pad centres as fractions of the race distance. Fractions (not metres)
- * so every allowed distance — and the future circuit track — derives its
- * own positions from one definition.
+ * Pad centres as fractions of the loop length (LOOP_LENGTH_M). Fractions
+ * (not metres) so the one fixed loop derives its pad positions from a
+ * single definition, and each pad fires once on every lap it's crossed.
  */
 export const BOOST_PAD_FRACTIONS = [0.25, 0.5, 0.75] as const
 
@@ -153,7 +205,7 @@ export const BOOST_DURATION_MS = 800
 
 // ─── Hurdles ────────────────────────────────
 //
-// Crossbars at fixed fractions of the race distance. Tapping the jump key
+// Crossbars at fixed fractions of the PHYSICAL loop. Tapping the jump key
 // opens a short airborne window; crossing a hurdle inside the window is
 // free, crossing outside it knocks the racer down: velocity drops to
 // zero, they spend HURDLE_KNOCKDOWN_MS on the ground (no sprinting or
@@ -162,7 +214,8 @@ export const BOOST_DURATION_MS = 800
 // Space" from trivially clearing everything — timing the jump is the
 // mechanic.
 
-/** Hurdle centres as fractions of the race distance. */
+/** Hurdle centres as fractions of the loop length (LOOP_LENGTH_M). A bar
+ *  is one physical obstacle crossed — and so jumped/clipped — once per lap. */
 export const HURDLE_FRACTIONS = [0.35, 0.65] as const
 
 /** Airborne window opened by one jump tap. */

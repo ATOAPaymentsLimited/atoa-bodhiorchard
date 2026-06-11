@@ -29,31 +29,49 @@
           PRE-RACE SETUP
         </div>
         <h2 class="setup__title">Invite to race</h2>
-        <p class="setup__sub">Pick a distance and up to {{ MAX_RACERS - 1 }} rivals to challenge.</p>
+        <p class="setup__sub">Pick your laps and up to {{ MAX_RACERS - 1 }} rivals to challenge.</p>
       </header>
+
+      <!-- Everything between the pinned header and footer scrolls when the
+           dialog is taller than the viewport (small laptop / split screen),
+           so the send button can never be pushed off-screen. -->
+      <div class="setup__body">
 
       <v-alert v-if="error" type="error" class="mx-6 mb-4" density="compact">
         {{ error }}
       </v-alert>
 
-      <!-- Distance pills -->
+      <!-- Lap pills. The race always runs on the one fixed circuit loop;
+           the choice is how many times around it. We still send distanceM
+           on the wire (lapCount · LOOP_LENGTH_M), so the labels show laps
+           but the value the server validates is the existing distance. -->
       <section class="setup__section">
-        <div class="setup__section-label">Distance</div>
-        <div class="setup__pills" role="radiogroup" aria-label="Race distance">
+        <div class="setup__section-label">Laps</div>
+        <div class="setup__pills" role="radiogroup" aria-label="Race laps">
           <button
-            v-for="d in ALLOWED_DISTANCES_M"
-            :key="d"
+            v-for="laps in ALLOWED_LAP_COUNTS"
+            :key="laps"
             type="button"
             class="setup__pill"
-            :class="{ 'setup__pill--active': distanceM === d }"
+            :class="{ 'setup__pill--active': distanceM === lapCountToDistanceM(laps) }"
             role="radio"
-            :aria-checked="distanceM === d"
-            @click="distanceM = d"
+            :aria-checked="distanceM === lapCountToDistanceM(laps)"
+            @click="distanceM = lapCountToDistanceM(laps)"
           >
-            <span class="setup__pill-value">{{ d }}</span>
-            <span class="setup__pill-unit">m</span>
+            <span class="setup__pill-value">{{ laps }}</span>
+            <span class="setup__pill-unit">{{ laps === 1 ? 'lap' : 'laps' }}</span>
           </button>
         </div>
+      </section>
+
+      <!-- Dev-only: bot test mode (vite dev builds only; the server
+           additionally forces botCount to 0 in production). -->
+      <section v-if="isDevBuild" class="setup__section">
+        <div class="setup__section-label setup__section-label--spaced">Test bots (dev only)</div>
+        <AppPillToggle
+          v-model="botCount"
+          :options="BOT_COUNT_OPTIONS"
+        />
       </section>
 
       <!-- Invitees list -->
@@ -77,6 +95,8 @@
           />
         </div>
       </section>
+
+      </div>
 
       <footer class="setup__footer">
         <v-btn variant="text" size="large" @click="$emit('update:modelValue', false)">
@@ -103,10 +123,29 @@ import { useRouter } from 'vue-router'
 import api from '@/services/api'
 import { useAuthStore } from '@/stores/auth'
 import { OrgRoomClient } from '@/multiplayer/OrgRoomClient'
-import { ALLOWED_DISTANCES_M, MAX_RACERS } from '@shared/race/RaceConstants'
+import {
+  ALLOWED_DISTANCES_M,
+  ALLOWED_LAP_COUNTS,
+  MAX_RACERS,
+  lapCountToDistanceM,
+} from '@shared/race/RaceConstants'
+import AppPillToggle from '@/components/common/AppPillToggle.vue'
 import RaceThemeBackdrop from './RaceThemeBackdrop.vue'
 import CheckerFlagIcon from './CheckerFlagIcon.vue'
 import MemberPicker, { type MemberPickerEntry } from './MemberPicker.vue'
+
+/**
+ * Dev-only bot picker: lets a single dev exercise full races without
+ * inviting anyone. Rendered only on vite dev builds (isDevBuild) and
+ * server-gated besides — production multiplayer forces botCount to 0.
+ */
+const BOT_COUNT_OPTIONS: Array<{ label: string; value: number }> = [
+  { label: 'None', value: 0 },
+  { label: '1', value: 1 },
+  { label: '3', value: 3 },
+  { label: '7', value: 7 },
+]
+const isDevBuild = import.meta.env.DEV
 
 type DirectoryEntry = MemberPickerEntry
 
@@ -123,6 +162,7 @@ const router = useRouter()
 const authStore = useAuthStore()
 
 const distanceM = ref<number>(ALLOWED_DISTANCES_M[0])
+const botCount = ref<number>(0)
 const selectedIds = ref<string[]>([])
 const sending = ref(false)
 const error = ref<string>('')
@@ -142,8 +182,10 @@ const invitableMembers = computed(() => {
   })
 })
 
+// With test bots requested, zero human invitees is a valid solo-dev race
+// (bots count toward MIN_RACERS server-side, so host + 1 bot can start).
 const canSubmit = computed(() =>
-  selectedIds.value.length >= 1
+  (selectedIds.value.length >= 1 || botCount.value > 0)
   && selectedIds.value.length <= MAX_RACERS - 1
   && !sending.value,
 )
@@ -155,6 +197,7 @@ watch(
     error.value = ''
     selectedIds.value = preId ? [preId] : []
     distanceM.value = ALLOWED_DISTANCES_M[0]
+    botCount.value = 0
     if (directory.value.length === 0) void loadDirectory()
   },
   { immediate: true },
@@ -182,6 +225,10 @@ async function onSend(): Promise<void> {
     const { roomId } = await client.sendRaceCreate({
       invitedUserIds: [...selectedIds.value],
       distanceM: distanceM.value,
+      // The circuit loop is the only track now — always send 'circuit'.
+      // distanceM (100/200) selects 1 or 2 laps over that fixed loop.
+      trackShape: 'circuit',
+      botCount: botCount.value,
     })
     emit('update:modelValue', false)
     await router.push(`/raceview/${roomId}`)
@@ -198,6 +245,12 @@ async function onSend(): Promise<void> {
 .setup {
   position: relative;
   overflow: hidden;
+  /* Cap to the viewport (dvh tracks mobile browser chrome) and lay out as a
+     column so the header and footer pin while the body scrolls between them —
+     the send button can never be pushed off a short screen. */
+  display: flex;
+  flex-direction: column;
+  max-height: calc(100dvh - 48px);
   border-radius: 18px;
   background: linear-gradient(180deg, #0d1422 0%, #0a0f1a 100%);
   color: #fff;
@@ -216,6 +269,16 @@ async function onSend(): Promise<void> {
 /* ── Header ───────────────────────────────── */
 .setup__header {
   padding: 28px 28px 16px;
+  flex-shrink: 0;
+}
+
+/* Scroll region between the pinned header and footer. min-height: 0 lets
+   this flex item shrink below its content height so overflow engages;
+   without it the body grows unbounded and the footer clips off-screen. */
+.setup__body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
 }
 .setup__eyebrow {
   display: inline-flex;
@@ -274,6 +337,13 @@ async function onSend(): Promise<void> {
 }
 .setup__count-sep { opacity: 0.4; margin: 0 2px; }
 
+/* Extra top margin for a section label that follows another control
+   (e.g. the dev test-bots label under the lap pills). */
+.setup__section-label--spaced {
+  display: block;
+  margin-bottom: 10px;
+}
+
 /* Distance pills */
 .setup__pills {
   display: flex;
@@ -316,10 +386,12 @@ async function onSend(): Promise<void> {
   opacity: 0.7;
 }
 
-/* Scrollable container around the shared MemberPicker. */
+/* Member list. On a tall screen it caps at 260px and scrolls internally;
+   on a short screen the whole dialog body scrolls instead, so the cap
+   relaxes (min of the two) to avoid a cramped scrollbox inside a scrollbox. */
 .setup__members-container {
   padding: 4px;
-  max-height: 260px;
+  max-height: min(260px, 40dvh);
   overflow-y: auto;
   border-radius: 12px;
   border: 1px solid rgba(255, 255, 255, 0.06);
@@ -340,6 +412,7 @@ async function onSend(): Promise<void> {
   padding: 16px 20px 20px;
   border-top: 1px solid rgba(255, 255, 255, 0.06);
   margin-top: 6px;
+  flex-shrink: 0;
 }
 .setup__send {
   display: inline-flex;
