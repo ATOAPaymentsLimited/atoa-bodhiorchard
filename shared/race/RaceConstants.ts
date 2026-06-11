@@ -130,6 +130,60 @@ export const WALK_REGEN_PER_S = 0.15
  *  still net-negative on a clock with finite race length. */
 export const IDLE_REGEN_PER_S = 0.3
 
+// ─── Boost pads ─────────────────────────────
+//
+// Glowing strips painted across the track at fixed fractions of the race
+// distance. Crossing one grants a free speed burst — faster than a sprint
+// and with zero stamina drain. The skill expression is *not* sprinting
+// right before a pad: a tap-banked sprint window overlaps the boost and
+// wastes both stamina and the differential.
+
+/**
+ * Pad centres as fractions of the race distance. Fractions (not metres)
+ * so every allowed distance — and the future circuit track — derives its
+ * own positions from one definition.
+ */
+export const BOOST_PAD_FRACTIONS = [0.25, 0.5, 0.75] as const
+
+/** Speed target while boosted. Above RUN_TARGET_MPS, below V_MAX_MPS. */
+export const BOOST_TARGET_MPS = 9
+
+/** How long one pad's boost lasts from the moment it's crossed. */
+export const BOOST_DURATION_MS = 800
+
+// ─── Hurdles ────────────────────────────────
+//
+// Crossbars at fixed fractions of the race distance. Tapping the jump key
+// opens a short airborne window; crossing a hurdle inside the window is
+// free, crossing outside it knocks the racer down: velocity drops to
+// zero, they spend HURDLE_KNOCKDOWN_MS on the ground (no sprinting or
+// jumping while down), lose any banked sprint or boost, and then have to
+// accelerate back up from rest. A cooldown between jumps stops "hold
+// Space" from trivially clearing everything — timing the jump is the
+// mechanic.
+
+/** Hurdle centres as fractions of the race distance. */
+export const HURDLE_FRACTIONS = [0.35, 0.65] as const
+
+/** Airborne window opened by one jump tap. */
+export const HURDLE_JUMP_WINDOW_MS = 400
+
+/**
+ * Minimum gap between jump *starts*. With a 400ms window this caps the
+ * airborne duty cycle at 40%, so spamming jump clears well under half of
+ * the hurdles by luck while a timed jump always clears.
+ */
+export const HURDLE_JUMP_COOLDOWN_MS = 1000
+
+/**
+ * Time spent on the ground after hitting a hurdle — covers the fall and
+ * the get-up before the racer can accelerate again from rest. Sized so a
+ * missed hurdle costs ~2s versus a clean crossing at sprint speed: a
+ * mistake that visibly reorders the field but never feels race-ending
+ * with two hurdles per race.
+ */
+export const HURDLE_KNOCKDOWN_MS = 1500
+
 /**
  * Server / live-mode sim tick period. Matches Colyseus 20Hz.
  *

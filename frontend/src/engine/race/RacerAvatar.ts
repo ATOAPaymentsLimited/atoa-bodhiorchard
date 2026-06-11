@@ -41,6 +41,8 @@ import { KayKitCharacterFactory, getClonedMaterials } from '../characters/KayKit
 import { findAnimTrack, type ContainerWithAnims } from '../characters/AnimUtils'
 import { getAnimationGLB } from '../characters/KayKitManifest'
 import type { CharacterConfig } from '../characters/CharacterConfig'
+import { HURDLE_JUMP_WINDOW_MS } from '@shared/race/RaceConstants'
+import type { RacerKinematics } from './types'
 import { disposeEntity, safeDestroyMaterial } from './dispose'
 
 /**
@@ -76,6 +78,18 @@ const IDLE_SWAP_THRESHOLD_MPS = 0.5
 /** Above this velocity, assume the player is sprinting (swap Walk → Running_A). */
 const SPRINT_SWAP_THRESHOLD_MPS = 4.0
 
+/**
+ * Hurdle-jump hop arc scales with the racer's speed at takeoff: a
+ * standing hop barely clears the bar while a boosted leap soars. Peak
+ * height = MIN + PER_MPS · v, clamped to MAX.
+ */
+const JUMP_ARC_MIN_HEIGHT_M = 0.45
+const JUMP_ARC_HEIGHT_PER_MPS = 0.06
+const JUMP_ARC_MAX_HEIGHT_M = 1.05
+
+/** Arc duration mirrors the server's airborne window so landing lines up. */
+const JUMP_ARC_DURATION_S = HURDLE_JUMP_WINDOW_MS / 1000
+
 export class RacerAvatar {
   readonly racerId: string
   readonly laneZ: number
@@ -97,6 +111,24 @@ export class RacerAvatar {
   private displayX = 0
   private lastServerVelocity = 0
   private initialized = false
+
+  /**
+   * Hurdle-jump hop: the server flags the racer airborne while its jump
+   * window is open; we animate a sine arc on Y over the same duration so
+   * the landing visually matches the physics window closing. Peak height
+   * is captured at takeoff from the racer's current speed.
+   */
+  private airborne = false
+  private jumpElapsedSec = 0
+  private jumpPeakM = JUMP_ARC_MIN_HEIGHT_M
+
+  /**
+   * Hurdle knockdown: while the server reports the racer down we hold the
+   * Defeat state (Death_A — a fall-to-ground track) and ignore
+   * velocity-driven anim picking; on get-up the emote clears and the
+   * locomotion graph blends back through Idle into Walk.
+   */
+  private knockedDown = false
 
   /**
    * When the server marks this racer as finished, we force the anim graph
@@ -151,26 +183,60 @@ export class RacerAvatar {
    * the target; the per-frame `update` lerps toward it so motion stays
    * smooth between server ticks.
    */
-  setKinematics(x: number, velocityMps: number, isSprinting: boolean): void {
+  setKinematics(k: RacerKinematics): void {
     if (!this.wrapper) return
 
-    this.targetX = x
-    this.lastServerVelocity = velocityMps
+    this.targetX = k.positionM
+    this.lastServerVelocity = k.velocityMps
+    if (k.isAirborne && !this.airborne) {
+      this.jumpElapsedSec = 0
+      this.jumpPeakM = Math.min(
+        JUMP_ARC_MAX_HEIGHT_M,
+        JUMP_ARC_MIN_HEIGHT_M + JUMP_ARC_HEIGHT_PER_MPS * k.velocityMps,
+      )
+    }
+    this.airborne = k.isAirborne
     if (!this.initialized) {
       // First patch: snap so the avatar isn't stuck at x=0 while lerping.
-      this.displayX = x
-      this.wrapper.setPosition(x, 0, this.laneZ)
+      this.displayX = k.positionM
+      this.wrapper.setPosition(k.positionM, 0, this.laneZ)
       this.initialized = true
     }
 
     // After the finish line we hold the Cheer state — see `finished`.
     if (this.finished) return
 
-    const nextState = this.pickAnimState(velocityMps, isSprinting)
+    if (k.isKnockedDown !== this.knockedDown) {
+      this.knockedDown = k.isKnockedDown
+      this.applyKnockdownState(k.isKnockedDown)
+    }
+    // While on the ground the Defeat state owns the rig — velocity-driven
+    // state picking resumes on the get-up edge above.
+    if (this.knockedDown) return
+
+    const nextState = this.pickAnimState(k.velocityMps, k.isSprinting)
     if (nextState === this.currentAnimState) return
 
     this.applyAnimState(nextState)
     this.currentAnimState = nextState
+  }
+
+  /**
+   * Enter / leave the fall animation. Entering pushes the graph through
+   * Idle (speed=0) so the Idle → Defeat edge can fire — same trick as
+   * `setFinished` uses for Cheer; Defeat's track is Death_A, a fall to
+   * the ground. Leaving clears the emote, blending back up through Idle.
+   */
+  private applyKnockdownState(down: boolean): void {
+    const anim = this.wrapper?.anim
+    if (!anim) return
+    if (down) {
+      anim.setInteger('speed', 0)
+      anim.setInteger('emote', 3)
+      this.currentAnimState = 'idle'
+    } else {
+      anim.setInteger('emote', 0)
+    }
   }
 
   /**
@@ -220,7 +286,19 @@ export class RacerAvatar {
     const alpha = 1 - Math.exp(-CATCHUP_PER_SEC * dtSec)
     this.displayX += (this.targetX - this.displayX) * alpha
 
-    this.wrapper.setPosition(this.displayX, 0, this.laneZ)
+    this.wrapper.setPosition(this.displayX, this.jumpArcY(dtSec), this.laneZ)
+  }
+
+  /**
+   * Advance the hop arc while airborne. sin(π·t) starts and ends at 0,
+   * and t clamps at 1, so a late "landed" patch from the server can never
+   * leave the avatar hanging above the track.
+   */
+  private jumpArcY(dtSec: number): number {
+    if (!this.airborne) return 0
+    this.jumpElapsedSec += dtSec
+    const t = Math.min(1, this.jumpElapsedSec / JUMP_ARC_DURATION_S)
+    return this.jumpPeakM * Math.sin(Math.PI * t)
   }
 
   /** Read-only access to the current display X — used by the camera. */
@@ -241,6 +319,10 @@ export class RacerAvatar {
     this.currentAnimState = 'idle'
     this.initialized = false
     this.finished = false
+    this.airborne = false
+    this.jumpElapsedSec = 0
+    this.jumpPeakM = JUMP_ARC_MIN_HEIGHT_M
+    this.knockedDown = false
   }
 
   private pickAnimState(velocityMps: number, isSprinting: boolean): 'idle' | 'walk' | 'run' {
