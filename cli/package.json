@@ -35,6 +35,6 @@
     "@types/inquirer": "^9.0.7",
     "@types/node": "^20.14.0",
     "typescript": "^5.5.0",
-    "vitest": "^3.2.0"
+    "vitest": "^4.1.8"
   }
 }
