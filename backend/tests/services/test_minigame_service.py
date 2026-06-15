@@ -54,9 +54,8 @@ async def test_submit_rejects_out_of_range_score() -> None:
 
 
 async def test_submit_rejects_score_above_per_game_max() -> None:
-    # Anti-tamper: a score within any loose global ceiling but above THIS
-    # game's own max must be rejected. Fishing tops out at 50, so 200 (a value
-    # a hand-crafted console request could send) is impossible and refused.
+    # Defense-in-depth: a score above THIS game's own max is refused even though
+    # it's a small number — fishing tops out at 50, so 200 is impossible.
     db = AsyncMock()
     assert GAMES["fishing"].max_score == 50
     with pytest.raises(MinigameValidationError, match="score out of range"):

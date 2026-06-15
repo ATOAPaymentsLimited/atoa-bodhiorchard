@@ -62,13 +62,9 @@ async def submit_score(
 ) -> dict[str, object]:
     """Validate then record the play; returns best/streak state (no XP).
 
-    The score is client-supplied, so it is bounded to the game's own
-    ``max_score`` here — not a loose global ceiling. This stops a tampered
-    request (e.g. a hand-crafted ``fetch`` from the browser console) from
-    posting an impossible score and stuffing the leaderboard. It does NOT make
-    scoring server-authoritative — a determined client can still submit up to
-    the legitimate maximum — but it caps the blast radius to an achievable
-    score for a no-stakes engagement game.
+    Scores reach here only from the trusted Colyseus bridge (server-computed),
+    but the per-game ``max_score`` is still enforced as defense-in-depth — a
+    buggy or compromised bridge can't post a score the game can't produce.
     """
     spec = GAMES.get(game)
     if spec is None:
