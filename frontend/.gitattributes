@@ -1,16 +1,13 @@
-# Auto-resolve package-lock.json merge conflicts.
-#
-# Background: this fork tracks an upstream that periodically bumps frontend
-# dependencies via Dependabot. Each upstream merge produced a conflict in
-# package-lock.json that humans cannot resolve by hand (it's a 250KB
-# generated file with cross-referenced integrity hashes). The repeated
-# workaround — deleting and regenerating the lockfile — silently re-rolled
-# every caret-ranged transitive dependency to whatever the public npm
-# registry happened to offer that day, which broke production on Jun 1.
-#
-# This merge driver (registered per-clone by frontend/package.json's
-# `prepare` script via the `npm-merge-driver` package) reconciles
-# package-lock.json by taking upstream's side and running `npm install`
-# against the merged package.json. Result: conflicts disappear and every
-# pin that wasn't touched by either side stays exactly where it was.
+# Force LF on shell scripts and the nginx template so a Windows checkout
+# can't introduce CRLF — a trailing \r corrupts sourced shell variables
+# (e.g. NGINX_RESOLVER) and breaks the container DNS auto-detection.
+*.envsh text eol=lf
+*.sh text eol=lf
+nginx.conf.template text eol=lf
+
+# Reconcile package-lock.json on merge via npm-merge-driver (installed by the
+# package.json `prepare` script). The lockfile is a large generated file with
+# cross-referenced integrity hashes that cannot be hand-merged; the driver
+# takes one side and re-runs `npm install` against the merged package.json so
+# pins untouched by either branch stay exactly where they were.
 package-lock.json merge=npm-merge-driver
