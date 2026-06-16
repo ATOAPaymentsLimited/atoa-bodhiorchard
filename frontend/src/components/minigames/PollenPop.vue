@@ -388,11 +388,14 @@ onUnmounted(() => {
 .pollen__banner {
   position: absolute;
   left: 50%;
-  top: 26%;
+  top: 24%;
   transform: translate(-50%, -50%);
-  font-size: 20px;
+  max-width: 90%;
+  font-size: 18px;
   font-weight: 800;
-  padding: 6px 18px;
+  text-align: center;
+  white-space: nowrap;
+  padding: 8px 22px;
   border-radius: 999px;
   pointer-events: none;
   color: #fff;
