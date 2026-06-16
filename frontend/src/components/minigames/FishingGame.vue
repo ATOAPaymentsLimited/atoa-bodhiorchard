@@ -15,19 +15,23 @@
 
   FishingGame — timing-bar fishing at the forest lake.
 
-  Five casts. The bobber sweeps across the water; hook inside the green
-  strike zone. Closer to center = bigger fish = more points (max 50).
+  Endless casts on three lives: the bobber sweeps the water, hook inside the
+  green strike zone (closer to centre = more points). Miss the zone and you lose
+  a life; every few casts the level steps up — faster sweep, smaller zone.
 -->
 <template>
   <div class="fishing d-flex flex-column ga-3">
     <div class="d-flex align-center justify-space-between">
-      <div class="fishing__casts">
-        <span
-          v-for="n in CASTS"
-          :key="n"
-          class="fishing__cast-dot"
-          :class="{ 'fishing__cast-dot--used': n <= cast }"
-        >🪝</span>
+      <div class="fishing__hud">
+        <span class="fishing__level">Lv {{ level }}</span>
+        <span class="fishing__lives">
+          <span
+            v-for="n in FISHING_LIVES"
+            :key="n"
+            class="fishing__heart"
+            :class="{ 'fishing__heart--lost': n > lives }"
+          >❤️</span>
+        </span>
       </div>
       <span class="fishing__score">{{ score }} <small>pts</small></span>
     </div>
@@ -37,7 +41,7 @@
       <div class="fishing__waves" />
       <div
         class="fishing__zone"
-        :style="{ left: `${zoneStart * 100}%`, width: `${ZONE_WIDTH * 100}%` }"
+        :style="{ left: `${zoneStart * 100}%`, width: `${zoneWidth * 100}%` }"
       />
       <div class="fishing__bobber" :style="{ left: `${marker * 100}%` }">
         <span class="fishing__bobber-emoji">🐟</span>
@@ -71,21 +75,23 @@
 
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
-import { CASTS, ZONE_WIDTH, bobberPositionAt, scoreForHook } from '@shared/minigames/fishing'
+import { FISHING_LIVES, ZONE_WIDTH, bobberPositionAt, scoreForHook } from '@shared/minigames/fishing'
 import type { MinigameResult } from '@/multiplayer/MinigameRoomClient'
 import { useMinigameRoom } from './useMinigameRoom'
 
 const emit = defineEmits<{ finished: [result: MinigameResult | null] }>()
 
-const cast = ref(0) // current cast index (0-based), from the server
 const marker = ref(0.5) // bobber position 0..1 — client-rendered for display
 const zoneStart = ref(0.42) // server-chosen strike-zone start
+const zoneWidth = ref(ZONE_WIDTH) // server-chosen zone width (narrows with level)
 const message = ref('Tap when the fish swims over the bright water!')
 const flash = ref<{ id: number; text: string; kind: 'hit' | 'miss' } | null>(null)
 const result = ref<MinigameResult | null>(null)
 
-const room = useMinigameRoom('fishing', { onEvent, onResult })
+const room = useMinigameRoom('fishing', { onEvent, onResult }, { startingLives: FISHING_LIVES })
 const score = room.score // authoritative running score
+const level = computed(() => room.round.value || 1) // server level (state.round)
+const lives = room.lives // authoritative lives remaining
 const done = computed(() => room.status.value === 'finished')
 
 let raf = 0
@@ -94,6 +100,7 @@ let sweepRate = 0 // server-chosen sweep speed for this cast
 let phase = 0 // server-chosen starting phase for this cast
 let sweeping = false
 let flashId = 0
+let lastLevel = 1 // tracks level changes so the level-up banner fires once
 // Points shown optimistically for the current cast (−1 = none yet), so the
 // server's authoritative result reconciles without a redundant second flash.
 let shownPoints = -1
@@ -115,22 +122,35 @@ function showResult(points: number): void {
     }
     message.value = points === 10 ? 'Perfect catch!' : 'Got one!'
   } else {
-    flash.value = { id: ++flashId, text: '💦 missed', kind: 'miss' }
+    flash.value = { id: ++flashId, text: '💔 missed', kind: 'miss' }
     message.value = 'It got away…'
   }
 }
 
 function onEvent(type: string, payload: unknown): void {
   if (type === 'fishing_cast') {
-    const p = payload as { cast: number; zoneStart: number; sweepRate: number; phase: number }
-    cast.value = p.cast
+    const p = payload as {
+      zoneStart: number
+      zoneWidth: number
+      sweepRate: number
+      phase: number
+      level: number
+    }
     zoneStart.value = p.zoneStart
+    zoneWidth.value = p.zoneWidth
     sweepRate = p.sweepRate
     phase = p.phase
     castStart = performance.now()
     sweeping = true
-    flash.value = null
     shownPoints = -1
+    // A new level shows its own banner; otherwise clear the last result flash.
+    if (p.level > lastLevel) {
+      lastLevel = p.level
+      flash.value = { id: ++flashId, text: `⬆ Level ${p.level}`, kind: 'hit' }
+      message.value = `Level ${p.level} — faster sweep, tighter zone!`
+    } else {
+      flash.value = null
+    }
   } else if (type === 'fishing_result') {
     // Authoritative result. It normally equals what we already showed (the
     // server scores from our reported in-cast time), so only re-render on a
@@ -158,7 +178,7 @@ function hook(): void {
   // authoritative one, so fishing_result never has to correct it.
   const elapsedMs = performance.now() - castStart
   marker.value = bobberPositionAt(elapsedMs, sweepRate, phase)
-  shownPoints = scoreForHook(marker.value, zoneStart.value)
+  shownPoints = scoreForHook(marker.value, zoneStart.value, zoneWidth.value)
   showResult(shownPoints)
   room.send('hook', { elapsedMs })
 }
@@ -174,12 +194,25 @@ onUnmounted(() => cancelAnimationFrame(raf))
 </script>
 
 <style scoped>
-.fishing__casts {
+.fishing__hud {
   display: flex;
-  gap: 4px;
-  font-size: 16px;
+  align-items: center;
+  gap: 10px;
 }
-.fishing__cast-dot--used {
+.fishing__level {
+  font-size: 13px;
+  font-weight: 800;
+  padding: 2px 9px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.12);
+  letter-spacing: 0.03em;
+}
+.fishing__lives {
+  display: flex;
+  gap: 2px;
+  font-size: 14px;
+}
+.fishing__heart--lost {
   opacity: 0.25;
   filter: grayscale(1);
 }

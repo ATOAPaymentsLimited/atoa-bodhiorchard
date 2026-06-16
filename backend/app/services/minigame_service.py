@@ -45,9 +45,15 @@ class GameSpec:
 
 
 # Game registry — adding a game here + a frontend component is all it takes.
+# ``max_score`` is a defense-in-depth ceiling (a compromised bridge can't post an
+# absurd score), not a target. Fishing and Pollen are endless/level-based, bounded
+# by lives + the multiplayer room's 5-minute reap, so their caps sit comfortably
+# above the best reap-bounded run to avoid rejecting a legitimate one: a flawless
+# Fishing run hooks at most ~one cast per 700ms result-pause (~430 casts × 10 =
+# ~4300), and Pollen spawns floor at ~320ms (~940 pops); 6000 clears both.
 GAMES: dict[str, GameSpec] = {
-    "fishing": GameSpec(name="Lake Fishing", max_score=50),
-    "pollen_pop": GameSpec(name="Pollen Pop", max_score=200),
+    "fishing": GameSpec(name="Lake Fishing", max_score=6000),
+    "pollen_pop": GameSpec(name="Pollen Pop", max_score=6000),
     "firefly": GameSpec(name="Firefly Follow", max_score=50),
 }
 

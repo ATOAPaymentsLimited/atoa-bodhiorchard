@@ -14,7 +14,6 @@
 
 import { describe, expect, it } from 'vitest'
 import {
-  GAME_MS,
   MOTE_EMOJI,
   SPAWN_JITTER,
   SPAWN_MIN_MS,
@@ -22,7 +21,8 @@ import {
   isMoteAlive,
   jitteredIntervalMs,
   motePositionAt,
-  spawnIntervalMs,
+  quotaForLevel,
+  spawnIntervalForLevel,
   spawnMote,
 } from '@shared/minigames/pollen'
 
@@ -38,40 +38,48 @@ describe('spawnMote', () => {
     expect(m.emojiIndex).toBeLessThan(MOTE_EMOJI.length)
   })
 
-  it('rises faster the later in the round it spawns', () => {
-    const early = spawnMote(1, 0, () => 0.5, 0)
-    const late = spawnMote(1, 0, () => 0.5, GAME_MS)
+  it('rises faster at higher levels', () => {
+    const early = spawnMote(1, 0, () => 0.5, 1)
+    const late = spawnMote(1, 0, () => 0.5, 9)
     expect(late.vy).toBeGreaterThan(early.vy)
   })
 })
 
-describe('spawnIntervalMs', () => {
-  it('ramps from the start interval down to the floor', () => {
-    expect(spawnIntervalMs(0)).toBe(SPAWN_START_MS)
-    expect(spawnIntervalMs(GAME_MS)).toBe(SPAWN_MIN_MS)
-    expect(spawnIntervalMs(GAME_MS / 2)).toBeLessThan(SPAWN_START_MS)
-    expect(spawnIntervalMs(GAME_MS / 2)).toBeGreaterThan(SPAWN_MIN_MS)
+describe('quotaForLevel', () => {
+  it('grows the pop quota each level', () => {
+    expect(quotaForLevel(1)).toBe(8)
+    expect(quotaForLevel(2)).toBeGreaterThan(quotaForLevel(1))
+    expect(quotaForLevel(3)).toBe(16)
+  })
+})
+
+describe('spawnIntervalForLevel', () => {
+  it('quickens the cadence from the start interval down to the floor', () => {
+    expect(spawnIntervalForLevel(1)).toBe(SPAWN_START_MS)
+    expect(spawnIntervalForLevel(99)).toBe(SPAWN_MIN_MS)
+    expect(spawnIntervalForLevel(4)).toBeLessThan(SPAWN_START_MS)
+    expect(spawnIntervalForLevel(4)).toBeGreaterThan(SPAWN_MIN_MS)
   })
 })
 
 describe('jitteredIntervalMs', () => {
   it('is neutral at rng=0.5 (returns the base cadence)', () => {
-    expect(jitteredIntervalMs(0, () => 0.5)).toBeCloseTo(spawnIntervalMs(0), 6)
-    expect(jitteredIntervalMs(GAME_MS, () => 0.5)).toBeCloseTo(spawnIntervalMs(GAME_MS), 6)
+    expect(jitteredIntervalMs(1, () => 0.5)).toBeCloseTo(spawnIntervalForLevel(1), 6)
+    expect(jitteredIntervalMs(9, () => 0.5)).toBeCloseTo(spawnIntervalForLevel(9), 6)
   })
 
   it('stays within ±SPAWN_JITTER of the base cadence at the extremes', () => {
-    const base = spawnIntervalMs(GAME_MS / 2)
-    expect(jitteredIntervalMs(GAME_MS / 2, () => 0)).toBeCloseTo(base * (1 - SPAWN_JITTER), 6)
-    expect(jitteredIntervalMs(GAME_MS / 2, () => 1)).toBeCloseTo(base * (1 + SPAWN_JITTER), 6)
+    const base = spawnIntervalForLevel(3)
+    expect(jitteredIntervalMs(3, () => 0)).toBeCloseTo(base * (1 - SPAWN_JITTER), 6)
+    expect(jitteredIntervalMs(3, () => 1)).toBeCloseTo(base * (1 + SPAWN_JITTER), 6)
   })
 })
 
 describe('motePositionAt', () => {
-  const mote = spawnMote(1, 1000, () => 0.5) // x=50, vx=0
+  const mote = spawnMote(1, 1000, () => 0.5) // vx = 0 at rng 0.5
 
   it('is at the spawn point at spawn time and rises over time', () => {
-    expect(motePositionAt(mote, 1000)).toEqual({ x: 50, y: 104 })
+    expect(motePositionAt(mote, 1000)).toEqual({ x: mote.x, y: 104 })
     expect(motePositionAt(mote, 2000).y).toBeCloseTo(104 - mote.vy, 6) // one second up
   })
 

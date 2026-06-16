@@ -13,7 +13,8 @@
 // limitations under the License.
 
 import { describe, expect, it } from "vitest"
-import { GAME_MS, MAX_CONCURRENT_MOTES } from "../../../../shared/minigames/pollen"
+import { CASTS_PER_LEVEL, FISHING_LIVES } from "../../../../shared/minigames/fishing"
+import { MAX_CONCURRENT_MOTES, quotaForLevel } from "../../../../shared/minigames/pollen"
 import type { MinigameRoomState } from "../../schema/MinigameRoomState"
 import type { MinigameHost } from "./MinigameEngine"
 import { FireflyEngine } from "./FireflyEngine"
@@ -28,12 +29,12 @@ interface SentMessage {
 function makeHost(): {
   host: MinigameHost
   sent: SentMessage[]
-  state: { score: number; round: number }
+  state: { score: number; round: number; lives: number }
   finished: () => boolean
 } {
   const sent: SentMessage[] = []
   let finished = false
-  const state = { score: 0, round: 0 }
+  const state = { score: 0, round: 0, lives: 0 }
   const host: MinigameHost = {
     state: state as unknown as MinigameRoomState,
     notify: (type, message) => sent.push({ type, message }),
@@ -88,22 +89,39 @@ describe("FireflyEngine", () => {
 })
 
 describe("FishingEngine", () => {
-  it("scores hooks server-side and finishes after five casts", () => {
+  it("scores hits server-side and steps the level up every CASTS_PER_LEVEL casts", () => {
     // zoneStart = 0.08 + 0.5*(0.84-0.16) = 0.42 → centre 0.5. rng 0.5 also gives
     // phase = 1.0, so sin(1·π) = 0 → elapsed 0 → bobber at 0.5 → bullseye (10).
+    // Every hook hits, so lives never drop and the level can climb.
     const engine = new FishingEngine(() => 0.5, () => 1000)
+    const { host, state } = makeHost()
+    engine.start(host)
+    expect(state.round).toBe(1)
+    for (let i = 0; i < CASTS_PER_LEVEL; i++) {
+      // A client-sent "score" in the payload is ignored — the server computes it.
+      engine.input(host, "hook", { elapsedMs: 0, score: 999 })
+    }
+    expect(state.score).toBe(CASTS_PER_LEVEL * 10)
+    expect(state.lives).toBe(FISHING_LIVES) // no misses → no lives lost
+    expect(state.round).toBe(2) // stepped up after CASTS_PER_LEVEL casts
+  })
+
+  it("loses a life on a missed hook and ends the run at zero lives", () => {
+    // rng 0 → zoneStart 0.08 (centre 0.16), phase 0 → bobber at elapsed 0 is
+    // 0.5: well outside the zone, so every hook misses and bleeds a life.
+    const engine = new FishingEngine(() => 0, () => 0)
     const { host, state, finished } = makeHost()
     engine.start(host)
-    for (let i = 0; i < 5; i++) {
-      // A client-sent "score" in the payload is ignored — the server computes it.
-      engine.input(host, "hook", { score: 999 })
+    for (let i = 0; i < FISHING_LIVES; i++) {
+      expect(finished()).toBe(false)
+      engine.input(host, "hook", { elapsedMs: 0 })
     }
-    expect(state.score).toBe(50)
+    expect(state.lives).toBe(0)
     expect(finished()).toBe(true)
-    expect(engine.finalScore()).toBe(50)
-    // A sixth hook after the game is over does nothing.
-    engine.input(host, "hook", {})
-    expect(engine.finalScore()).toBe(50)
+    expect(engine.finalScore()).toBe(0)
+    // A hook after game over does nothing.
+    engine.input(host, "hook", { elapsedMs: 0 })
+    expect(engine.finalScore()).toBe(0)
   })
 
   it("scores from the client's in-cast time, immune to server latency", () => {
@@ -135,44 +153,57 @@ describe("FishingEngine", () => {
 })
 
 describe("PollenEngine", () => {
-  it("validates pops against the server's live mote field", () => {
+  it("validates pops and advances a level once the quota is cleared", () => {
     let clock = 0
     const engine = new PollenEngine(() => 0.5, () => clock)
-    const { host, sent, state, finished } = makeHost()
+    const { host, state } = makeHost()
     engine.start(host)
+    expect(state.round).toBe(1)
 
-    // Tick past the first spawn interval → exactly one mote spawned.
-    clock = 600
-    engine.tick(host, 600)
-    const spawn = last(sent, "pollen_spawn")?.message as { id: number }
-    expect(spawn).toBeTruthy()
+    // rng 0.5 → neutral jitter, so a mote (id = i) spawns each 600ms interval.
+    // Pop each the instant it spawns (still alive) to clear level 1's quota.
+    const quota = quotaForLevel(1)
+    for (let i = 1; i <= quota; i++) {
+      clock += 600
+      engine.tick(host, clock)
+      engine.input(host, "pop", { id: i })
+    }
+    expect(state.score).toBe(quota)
+    expect(state.round).toBe(2) // quota cleared → level up
 
-    // A valid pop of a live mote scores once; a repeat or unknown id does not.
-    clock = 650
-    engine.input(host, "pop", { id: spawn.id })
-    expect(state.score).toBe(1)
-    engine.input(host, "pop", { id: spawn.id }) // already popped
-    engine.input(host, "pop", { id: 9999 }) // never existed
-    expect(state.score).toBe(1)
+    // A repeat or unknown id does not score.
+    engine.input(host, "pop", { id: 1 })
+    engine.input(host, "pop", { id: 9999 })
+    expect(state.score).toBe(quota)
+  })
 
-    // Reaching the duration finishes the game.
-    clock = 25000
-    engine.tick(host, 25000)
+  it("loses a life when escapes blow the budget, ending at zero lives", () => {
+    let clock = 0
+    const engine = new PollenEngine(() => 0.5, () => clock)
+    const { host, state, finished } = makeHost()
+    engine.start(host)
+    // Never pop: motes spawn and drift off the top. Each escape eats the level
+    // budget; enough escapes drain every life and end the run.
+    for (let t = 0; t < 1000 && !finished(); t++) {
+      clock += 500
+      engine.tick(host, clock)
+    }
     expect(finished()).toBe(true)
-    expect(engine.finalScore()).toBe(1)
+    expect(state.lives).toBe(0)
   })
 
   it("never lets more than MAX_CONCURRENT_MOTES live at once", () => {
     let clock = 0
     // rng=0 → slow-rising, long-lived motes that pile up fast, so the cap is
-    // the only thing keeping the arena from flooding.
+    // the only thing keeping the arena from flooding. Bounded below the first
+    // escape so the run is still live and density is purely cap-limited.
     const engine = new PollenEngine(() => 0, () => clock)
     const { host, sent } = makeHost()
     engine.start(host)
 
     let live = 0
     let maxLive = 0
-    for (clock = 100; clock < GAME_MS; clock += 100) {
+    for (clock = 100; clock <= 12000; clock += 100) {
       const before = sent.length
       engine.tick(host, clock)
       for (let i = before; i < sent.length; i++) {

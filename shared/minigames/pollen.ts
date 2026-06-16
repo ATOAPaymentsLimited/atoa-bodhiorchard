@@ -13,39 +13,48 @@
 // limitations under the License.
 
 /**
- * Pollen Pop — pure game logic for the timed popping game.
+ * Pollen Pop — pure game logic for the level-based popping game.
  *
  * Framework-free and shared. The server owns the mote field: it spawns motes
  * with a server-seeded RNG and streams their spawn parameters; the client
  * renders them deterministically. A pop the client sends is validated
  * server-side, so the client can never invent a mote or pop one twice.
  *
- * The round RAMPS: flowers rise faster and spawn on a quicker (jittered)
- * cadence as time runs out, with wide variance in position, drift, size, and
- * speed. On-screen density is hard-capped (MAX_CONCURRENT_MOTES), so the late
- * game is fast and fleeting rather than a flooded click-farm — yet the score
- * keeps climbing (motes cycle), so there's no fixed ceiling.
+ * Levels + lives: clear a per-level pop quota to advance; each level spawns on a
+ * quicker (jittered) cadence and the motes rise faster (density still capped by
+ * MAX_CONCURRENT_MOTES), so the late game outpaces a screenshot-then-click bot.
+ * Letting flowers escape past a per-level budget costs a life; the run ends at
+ * zero lives. Score is total pops — the depth you reach is the score, no ceiling.
  */
 
-/** Game length in seconds, and the same in milliseconds. */
-export const GAME_SECONDS = 25
-export const GAME_MS = GAME_SECONDS * 1000
 /** Renderable blossom glyphs; index is server-chosen so both sides agree. */
 export const MOTE_EMOJI = ['🌸', '🌼', '💮', '🌺'] as const
 
-/** Spawn interval (ms): starts here and ramps down to the floor below. The
- * floor is deliberately well above zero so the late game speeds up without
- * carpeting the arena in spawns — density is bounded by MAX_CONCURRENT_MOTES. */
+/** Lives a game starts with; over-escaping within a level costs one. */
+export const POLLEN_LIVES = 3
+/** Flowers that may drift off-screen per level before a life is lost. */
+export const POLLEN_ESCAPE_BUDGET = 6
+
+/** Pops needed to clear a level — grows each level. */
+const QUOTA_BASE = 8
+const QUOTA_STEP = 4
+export function quotaForLevel(level: number): number {
+  return QUOTA_BASE + (level - 1) * QUOTA_STEP
+}
+
+/** Spawn interval (ms): SPAWN_START_MS at level 1, easing to SPAWN_MIN_MS as the
+ *  level climbs. The floor stays well above zero — density is bounded by the
+ *  live-mote cap, not the cadence. */
 export const SPAWN_START_MS = 600
 export const SPAWN_MIN_MS = 320
-/** Motes rise up to (1 + SPEED_RAMP)× faster by the final second. */
+/** Motes rise up to (1 + SPEED_RAMP)× faster at the top of the ramp. */
 export const SPEED_RAMP = 1.6
-/** Hard ceiling on live motes. The screen never crowds past this, so the late
- * game is a reaction test (fast, fleeting targets) rather than a click-farm of
- * a flooded arena. Not a score cap — motes cycle, so pops keep accruing. */
+/** Levels over which the difficulty eases from level 1 to fully ramped. */
+const LEVELS_TO_MAX = 8
+/** Hard ceiling on live motes — the arena never floods, so the late game is a
+ *  reaction test of fast, fleeting targets rather than a flooded click-farm. */
 export const MAX_CONCURRENT_MOTES = 8
-/** Cadence jitter (±fraction). Spawns land off a fixed metronome so the rhythm
- * can't be memorised; 0.5 RNG is neutral, keeping the cadence deterministic. */
+/** Cadence jitter (±fraction). 0.5 RNG is neutral, keeping cadence deterministic. */
 export const SPAWN_JITTER = 0.3
 
 /** Below this y (percent, 0 = top) a mote has drifted off the top and dies. */
@@ -53,27 +62,27 @@ const DESPAWN_Y = -8
 /** Spawn y (percent) — just below the arena floor, so motes rise into view. */
 const SPAWN_Y = 104
 
-/** Normalised round progress (0..1) at `elapsedMs`. */
-function progress(elapsedMs: number): number {
-  return Math.min(1, Math.max(0, elapsedMs / GAME_MS))
+/** Difficulty ramp 0..1 across the first LEVELS_TO_MAX levels. */
+function levelRamp(level: number): number {
+  return Math.min(1, Math.max(0, (level - 1) / LEVELS_TO_MAX))
 }
 
 /**
- * Time between spawns at a point in the round — eases from SPAWN_START_MS down
- * to SPAWN_MIN_MS so the cadence quickens near the end. The floor stays well
- * above zero; the live count, not the cadence, bounds on-screen density.
+ * Time between spawns at a level — eases from SPAWN_START_MS down to
+ * SPAWN_MIN_MS so the cadence quickens as you climb. The floor stays well above
+ * zero; the live count, not the cadence, bounds on-screen density.
  */
-export function spawnIntervalMs(elapsedMs: number): number {
-  return SPAWN_START_MS - progress(elapsedMs) * (SPAWN_START_MS - SPAWN_MIN_MS)
+export function spawnIntervalForLevel(level: number): number {
+  return SPAWN_START_MS - levelRamp(level) * (SPAWN_START_MS - SPAWN_MIN_MS)
 }
 
 /**
- * The base cadence with ±SPAWN_JITTER randomness applied, so spawns don't fall
+ * The level cadence with ±SPAWN_JITTER randomness applied, so spawns don't fall
  * on a predictable metronome. `rng() === 0.5` is neutral (returns the base),
  * which keeps seeded callers deterministic.
  */
-export function jitteredIntervalMs(elapsedMs: number, rng: () => number = Math.random): number {
-  return spawnIntervalMs(elapsedMs) * (1 - SPAWN_JITTER + rng() * 2 * SPAWN_JITTER)
+export function jitteredIntervalMs(level: number, rng: () => number = Math.random): number {
+  return spawnIntervalForLevel(level) * (1 - SPAWN_JITTER + rng() * 2 * SPAWN_JITTER)
 }
 
 /**
@@ -92,17 +101,17 @@ export interface Mote {
 }
 
 /**
- * Spawn a mote with server-seeded (or test) RNG. `elapsedMs` ramps the rise
- * speed; the spread on position, drift, size, and speed is deliberately wide so
+ * Spawn a mote with server-seeded (or test) RNG. `level` ramps the rise speed;
+ * the spread on position, drift, size, and speed is deliberately wide so
  * trajectories vary shot-to-shot.
  */
 export function spawnMote(
   id: number,
   spawnAtMs: number,
   rng: () => number = Math.random,
-  elapsedMs = 0,
+  level = 1,
 ): Mote {
-  const speed = 1 + progress(elapsedMs) * SPEED_RAMP
+  const speed = 1 + levelRamp(level) * SPEED_RAMP
   return {
     id,
     spawnAtMs,

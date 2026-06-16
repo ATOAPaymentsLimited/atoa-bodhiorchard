@@ -33,4 +33,6 @@ export class MinigameRoomState extends Schema {
   @type("uint16") score = 0
   /** Round/level/cast counter for display (game-specific meaning). */
   @type("uint16") round = 0
+  /** Lives remaining (games that have them); 0 once the run is over. */
+  @type("uint8") lives = 0
 }

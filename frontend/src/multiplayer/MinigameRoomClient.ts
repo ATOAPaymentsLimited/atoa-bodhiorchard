@@ -30,6 +30,7 @@ export interface MinigameStateSnapshot {
   phase: "playing" | "finished"
   score: number
   round: number
+  lives: number
 }
 
 /** The recorded outcome, relayed from the bridge response on `mg_result`. */
@@ -56,6 +57,7 @@ interface MinigameStateShape {
   phase: string
   score: number
   round: number
+  lives: number
 }
 
 export class MinigameRoomClient {
@@ -125,6 +127,7 @@ export class MinigameRoomClient {
           phase: (room.state.phase as "playing" | "finished") ?? "playing",
           score: room.state.score ?? 0,
           round: room.state.round ?? 0,
+          lives: room.state.lives ?? 0,
         })
       } catch (err) {
         console.warn("[MinigameRoomClient] snapshot read skipped:", err)

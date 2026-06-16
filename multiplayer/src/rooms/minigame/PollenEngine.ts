@@ -13,11 +13,13 @@
 // limitations under the License.
 
 import {
-  GAME_MS,
   MAX_CONCURRENT_MOTES,
   type Mote,
+  POLLEN_ESCAPE_BUDGET,
+  POLLEN_LIVES,
   isMoteAlive,
   jitteredIntervalMs,
+  quotaForLevel,
   spawnMote,
 } from "../../../../shared/minigames/pollen"
 import type { MinigameEngine, MinigameHost } from "./MinigameEngine"
@@ -26,15 +28,23 @@ import type { MinigameEngine, MinigameHost } from "./MinigameEngine"
  * Server-authoritative Pollen Pop. The server owns the mote field: it spawns
  * motes (its RNG) and streams them; the client renders but never invents motes.
  * A pop is validated against the server's live set at the server's clock, so a
- * mote that never existed or already drifted off-screen can't be popped. Score
- * is the count of valid pops. Spawn cadence (jittered) and rise speed ramp up
- * over the round, but the live count is capped (see shared/minigames/pollen),
- * so the late game is fast and fleeting rather than a flooded click-farm.
+ * mote that never existed or already drifted off-screen can't be popped.
+ *
+ * Levels + lives: clearing a per-level pop quota advances the level (quicker,
+ * jittered cadence and faster-rising motes, density still capped), so the late
+ * game outpaces a slow bot. A flower that drifts off unpopped eats the level's
+ * escape budget; blowing the budget costs a life, and the run ends at zero
+ * lives. Score is the total valid pops.
  */
 export class PollenEngine implements MinigameEngine {
   private readonly motes = new Map<number, Mote>()
   private nextId = 1
   private score = 0
+  private level = 1
+  private levelPops = 0
+  private escapes = 0
+  private lives = POLLEN_LIVES
+  private ended = false
   private startMs = 0
   private lastSpawnMs = 0
 
@@ -46,48 +56,74 @@ export class PollenEngine implements MinigameEngine {
   start(host: MinigameHost): void {
     this.startMs = this.now()
     this.lastSpawnMs = this.startMs
-    host.notify("pollen_start", { durationMs: GAME_MS })
+    this.score = 0
+    this.level = 1
+    this.levelPops = 0
+    this.escapes = 0
+    this.lives = POLLEN_LIVES
+    this.ended = false
+    host.state.round = this.level
+    host.state.lives = this.lives
+    host.notify("pollen_start", {
+      level: this.level,
+      lives: this.lives,
+      quota: quotaForLevel(this.level),
+    })
   }
 
   tick(host: MinigameHost, nowMs: number): void {
-    if (nowMs - this.startMs >= GAME_MS) {
-      host.finish()
-      return
-    }
-    // Reap dead motes first so the concurrency cap below sees freed slots this
-    // same tick.
+    if (this.ended) return
+    // Reap dead motes first: each escape eats into the level's budget, and
+    // blowing the budget costs a life. Out of lives ends the run. Reaping
+    // before spawning also lets the concurrency cap below see freed slots.
     for (const [id, mote] of this.motes) {
-      if (!isMoteAlive(mote, nowMs)) {
-        this.motes.delete(id)
-        host.notify("pollen_despawn", { id })
+      if (isMoteAlive(mote, nowMs)) continue
+      this.motes.delete(id)
+      host.notify("pollen_despawn", { id })
+      this.escapes += 1
+      if (this.escapes >= POLLEN_ESCAPE_BUDGET) {
+        this.escapes = 0
+        this.lives -= 1
+        host.state.lives = this.lives
+        host.notify("pollen_life", { lives: this.lives })
+        if (this.lives <= 0) {
+          this.ended = true
+          host.finish()
+          return
+        }
       }
     }
-    // Spawn cadence shortens (with jitter) as the round goes on and each mote's
-    // rise speed ramps with elapsed time — but the live count is capped, so the
-    // late game stays fast and fleeting instead of carpeting the arena. When at
-    // the cap we still advance the clock, dropping the surplus spawn rather than
-    // queueing a burst for when a slot frees.
+    // Spawn on the level cadence (jittered), capped so the arena can't flood.
     for (;;) {
-      const interval = jitteredIntervalMs(this.lastSpawnMs - this.startMs, this.rng)
+      const interval = jitteredIntervalMs(this.level, this.rng)
       if (nowMs - this.lastSpawnMs < interval) break
       this.lastSpawnMs += interval
       if (this.motes.size >= MAX_CONCURRENT_MOTES) continue
-      const mote = spawnMote(this.nextId++, nowMs, this.rng, nowMs - this.startMs)
+      const mote = spawnMote(this.nextId++, nowMs, this.rng, this.level)
       this.motes.set(mote.id, mote)
       host.notify("pollen_spawn", mote)
     }
   }
 
   input(host: MinigameHost, type: string, payload: unknown): void {
-    if (type !== "pop") return
+    if (this.ended || type !== "pop") return
     const id = readId(payload)
     if (id === null) return
     const mote = this.motes.get(id)
     if (!mote || !isMoteAlive(mote, this.now())) return
     this.motes.delete(id)
     this.score += 1
+    this.levelPops += 1
     host.state.score = this.score
     host.notify("pollen_popped", { id, score: this.score })
+    // Clearing the quota advances the level: faster, with a fresh escape budget.
+    if (this.levelPops >= quotaForLevel(this.level)) {
+      this.level += 1
+      this.levelPops = 0
+      this.escapes = 0
+      host.state.round = this.level
+      host.notify("pollen_levelup", { level: this.level, quota: quotaForLevel(this.level) })
+    }
   }
 
   finalScore(): number {

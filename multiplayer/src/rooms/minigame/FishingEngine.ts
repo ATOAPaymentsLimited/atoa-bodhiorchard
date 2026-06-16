@@ -13,12 +13,14 @@
 // limitations under the License.
 
 import {
-  CASTS,
+  CASTS_PER_LEVEL,
+  FISHING_LIVES,
   bobberPositionAt,
   randomPhase,
   randomSweepRate,
   randomZoneStart,
   scoreForHook,
+  zoneWidthForLevel,
 } from "../../../../shared/minigames/fishing"
 import type { MinigameEngine, MinigameHost } from "./MinigameEngine"
 
@@ -35,11 +37,18 @@ const RESULT_PAUSE_MS = 700
  * bobber really was — using its OWN measured elapsed, so the client can't claim
  * a perfect hook — and scores it. The small latency penalty is the trade-off
  * for not trusting client-reported timing.
+ *
+ * Endless + lives: casting continues until lives run out. A missed hook (0 pts)
+ * costs a life; every CASTS_PER_LEVEL casts the level steps up, speeding the
+ * sweep and narrowing the zone — so the late game outpaces a slow bot.
  */
 export class FishingEngine implements MinigameEngine {
-  private cast = 0
+  private level = 1
+  private castInLevel = 0
+  private lives = FISHING_LIVES
   private score = 0
   private zoneStart = 0
+  private zoneWidth = 0
   private sweepRate = 0
   private phase = 0
   private castStartMs = 0
@@ -53,7 +62,9 @@ export class FishingEngine implements MinigameEngine {
   ) {}
 
   start(host: MinigameHost): void {
-    this.cast = 0
+    this.level = 1
+    this.castInLevel = 0
+    this.lives = FISHING_LIVES
     this.score = 0
     this.beginCast(host)
   }
@@ -71,19 +82,26 @@ export class FishingEngine implements MinigameEngine {
     const reported = readElapsed(payload)
     const elapsed = reported === null ? cap : Math.min(Math.max(0, reported), cap)
     const marker = bobberPositionAt(elapsed, this.sweepRate, this.phase)
-    const points = scoreForHook(marker, this.zoneStart)
+    const points = scoreForHook(marker, this.zoneStart, this.zoneWidth)
     this.score += points
+    if (points === 0) this.lives -= 1
     host.state.score = this.score
-    host.notify("fishing_result", { cast: this.cast, points, marker })
+    host.state.lives = this.lives
+    host.notify("fishing_result", { points, marker, level: this.level, lives: this.lives })
 
-    this.cast += 1
     // Hold the result on screen before advancing (or finishing), so the catch
     // feedback is visible — the server paces this, not the client.
-    if (this.cast >= CASTS) {
+    if (this.lives <= 0) {
       host.scheduleAfter(RESULT_PAUSE_MS, () => host.finish())
-    } else {
-      host.scheduleAfter(RESULT_PAUSE_MS, () => this.beginCast(host))
+      return
     }
+    // Every CASTS_PER_LEVEL casts steps the difficulty up a level.
+    this.castInLevel += 1
+    if (this.castInLevel >= CASTS_PER_LEVEL) {
+      this.level += 1
+      this.castInLevel = 0
+    }
+    host.scheduleAfter(RESULT_PAUSE_MS, () => this.beginCast(host))
   }
 
   finalScore(): number {
@@ -91,17 +109,21 @@ export class FishingEngine implements MinigameEngine {
   }
 
   private beginCast(host: MinigameHost): void {
-    this.zoneStart = randomZoneStart(this.rng)
-    this.sweepRate = randomSweepRate(this.cast, this.rng)
+    this.zoneWidth = zoneWidthForLevel(this.level)
+    this.zoneStart = randomZoneStart(this.rng, this.zoneWidth)
+    this.sweepRate = randomSweepRate(this.level, this.rng)
     this.phase = randomPhase(this.rng)
     this.castStartMs = this.now()
     this.canHook = true
-    host.state.round = this.cast + 1
+    host.state.round = this.level
+    host.state.lives = this.lives
     host.notify("fishing_cast", {
-      cast: this.cast,
       zoneStart: this.zoneStart,
+      zoneWidth: this.zoneWidth,
       sweepRate: this.sweepRate,
       phase: this.phase,
+      level: this.level,
+      lives: this.lives,
     })
   }
 }

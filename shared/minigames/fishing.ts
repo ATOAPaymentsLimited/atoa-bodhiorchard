@@ -23,31 +23,47 @@
  * cast clock; the client only renders and sends hook timing.
  */
 
-/** Number of casts in one game. */
-export const CASTS = 5
-/** Strike-zone width as a fraction of the water (0..1). */
+/** Lives a game starts with; a missed cast (hook outside the zone) costs one. */
+export const FISHING_LIVES = 3
+/** Casts completed before the difficulty steps up a level. */
+export const CASTS_PER_LEVEL = 4
+/** Strike-zone width (fraction of the water) at level 1 — shrinks with level. */
 export const ZONE_WIDTH = 0.16
 
-/** Sweep speed jitter band: the per-cast base is scaled by 0.85×..1.35×. */
+/** Sweep speed jitter band: the per-level base is scaled by 0.85×..1.35×. */
 const SWEEP_JITTER_MIN = 0.85
 const SWEEP_JITTER_SPAN = 0.5
+/** Sweep speed ramp: level-1 base, climbing per level, capped so "endless"
+ *  never means an unplayably (or un-renderably) fast bobber. */
+const SWEEP_RATE_BASE = 0.9
+const SWEEP_RATE_PER_LEVEL = 0.22
+const SWEEP_RATE_MAX = 3.2
+/** Strike-zone shrink ramp: narrows from ZONE_WIDTH toward a floor as the level
+ *  climbs, so the target gets meaner (and harder for a slow bot to hit). */
+const ZONE_WIDTH_MIN = 0.07
+const ZONE_WIDTH_PER_LEVEL = 0.012
 
 /**
- * Base bobber sweep speed (Hz-ish) for a given cast. Speeds up slightly each
- * cast so later casts are harder. `cast` is 0-indexed (0 is the first cast).
- * The live rate is this jittered per cast (see `randomSweepRate`).
+ * Base bobber sweep speed (Hz-ish) for a level. Faster each level so the late
+ * game outpaces a screenshot-then-click bot; `level` is 1-indexed and the rate
+ * is capped so it stays renderable. The live rate is this jittered per cast.
  */
-export function sweepRateForCast(cast: number): number {
-  return 0.9 + cast * 0.18
+export function sweepRateForLevel(level: number): number {
+  return Math.min(SWEEP_RATE_MAX, SWEEP_RATE_BASE + (level - 1) * SWEEP_RATE_PER_LEVEL)
+}
+
+/** Strike-zone width for a level — shrinks toward ZONE_WIDTH_MIN as level rises. */
+export function zoneWidthForLevel(level: number): number {
+  return Math.max(ZONE_WIDTH_MIN, ZONE_WIDTH - (level - 1) * ZONE_WIDTH_PER_LEVEL)
 }
 
 /**
- * A cast's actual sweep speed: the per-cast base, jittered, so the bobber moves
- * at a different speed every play — not just the strike-zone moving. The server
- * picks it (server-seeded) and sends it so the client renders the same curve.
+ * A cast's actual sweep speed: the level base, jittered, so the bobber moves at
+ * a different speed every cast/play. The server picks it (server-seeded) and
+ * sends it so the client renders the same curve.
  */
-export function randomSweepRate(cast: number, rng: () => number = Math.random): number {
-  return sweepRateForCast(cast) * (SWEEP_JITTER_MIN + rng() * SWEEP_JITTER_SPAN)
+export function randomSweepRate(level: number, rng: () => number = Math.random): number {
+  return sweepRateForLevel(level) * (SWEEP_JITTER_MIN + rng() * SWEEP_JITTER_SPAN)
 }
 
 /**
@@ -75,23 +91,29 @@ export function bobberPositionAt(elapsedMs: number, sweepRate: number, phase: nu
  * A fresh strike-zone start position (left edge, 0..1) for the next cast.
  * `rng` is injectable so the server (server-seeded) and tests stay deterministic.
  */
-export function randomZoneStart(rng: () => number = Math.random): number {
-  return 0.08 + rng() * (0.84 - ZONE_WIDTH)
+export function randomZoneStart(
+  rng: () => number = Math.random,
+  zoneWidth: number = ZONE_WIDTH,
+): number {
+  return 0.08 + rng() * (0.84 - zoneWidth)
 }
 
 /**
- * Points for a hook: how close the bobber (`marker`) was to the zone centre.
- * 10 (bullseye) / 7 / 4 inside the zone, 0 for a miss. Pure — the server calls
- * this with its own recomputed `marker` and its own `zoneStart`.
+ * Points for a hook: how close the bobber (`marker`) was to the zone centre,
+ * relative to the (level-dependent) `zoneWidth`. 10 (bullseye) / 7 / 4 inside
+ * the zone, 0 for a miss. Pure — the server calls this with its own recomputed
+ * `marker`, `zoneStart`, and `zoneWidth`.
  */
-export function scoreForHook(marker: number, zoneStart: number): number {
-  const center = zoneStart + ZONE_WIDTH / 2
-  const offset = Math.abs(marker - center) / (ZONE_WIDTH / 2)
+export function scoreForHook(
+  marker: number,
+  zoneStart: number,
+  zoneWidth: number = ZONE_WIDTH,
+): number {
+  const half = zoneWidth / 2
+  const center = zoneStart + half
+  const offset = Math.abs(marker - center) / half
   if (offset > 1) return 0
   if (offset < 0.35) return 10
   if (offset < 0.7) return 7
   return 4
 }
-
-/** The maximum achievable score: every cast a bullseye. */
-export const FISHING_MAX_SCORE = CASTS * 10
