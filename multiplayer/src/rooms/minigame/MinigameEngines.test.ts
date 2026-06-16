@@ -13,6 +13,7 @@
 // limitations under the License.
 
 import { describe, expect, it } from "vitest"
+import { GAME_MS, MAX_CONCURRENT_MOTES } from "../../../../shared/minigames/pollen"
 import type { MinigameRoomState } from "../../schema/MinigameRoomState"
 import type { MinigameHost } from "./MinigameEngine"
 import { FireflyEngine } from "./FireflyEngine"
@@ -88,8 +89,8 @@ describe("FireflyEngine", () => {
 
 describe("FishingEngine", () => {
   it("scores hooks server-side and finishes after five casts", () => {
-    // zoneStart = 0.08 + 0.5*(0.84-0.16) = 0.42 → centre 0.5.
-    // now constant → elapsed 0 → bobber at 0.5 → bullseye (10) every cast.
+    // zoneStart = 0.08 + 0.5*(0.84-0.16) = 0.42 → centre 0.5. rng 0.5 also gives
+    // phase = 1.0, so sin(1·π) = 0 → elapsed 0 → bobber at 0.5 → bullseye (10).
     const engine = new FishingEngine(() => 0.5, () => 1000)
     const { host, state, finished } = makeHost()
     engine.start(host)
@@ -112,8 +113,9 @@ describe("FishingEngine", () => {
     const { host, sent } = makeHost()
     engine.start(host) // cast 0, castStartMs = 0
     // 5s elapsed server-side (latency), but the client hooked at the very start
-    // (bobber at 0.5 = bullseye). The server's own 5000ms clock would have
-    // scored a miss; using the client's reported moment it's a bullseye.
+    // (bobber at 0.5 = bullseye). Scoring at the server's own 5000ms clock would
+    // put the bobber well off-centre (a worse band); using the client's reported
+    // moment it's a bullseye.
     clock = 5000
     engine.input(host, "hook", { elapsedMs: 0 })
     const r = last(sent, "fishing_result")?.message as { points: number }
@@ -158,5 +160,30 @@ describe("PollenEngine", () => {
     engine.tick(host, 25000)
     expect(finished()).toBe(true)
     expect(engine.finalScore()).toBe(1)
+  })
+
+  it("never lets more than MAX_CONCURRENT_MOTES live at once", () => {
+    let clock = 0
+    // rng=0 → slow-rising, long-lived motes that pile up fast, so the cap is
+    // the only thing keeping the arena from flooding.
+    const engine = new PollenEngine(() => 0, () => clock)
+    const { host, sent } = makeHost()
+    engine.start(host)
+
+    let live = 0
+    let maxLive = 0
+    for (clock = 100; clock < GAME_MS; clock += 100) {
+      const before = sent.length
+      engine.tick(host, clock)
+      for (let i = before; i < sent.length; i++) {
+        if (sent[i].type === "pollen_spawn") live += 1
+        else if (sent[i].type === "pollen_despawn") live -= 1
+      }
+      // The cap holds every tick — never a transient overshoot.
+      expect(live).toBeLessThanOrEqual(MAX_CONCURRENT_MOTES)
+      maxLive = Math.max(maxLive, live)
+    }
+
+    expect(maxLive).toBe(MAX_CONCURRENT_MOTES) // and it does fill to the cap
   })
 })
