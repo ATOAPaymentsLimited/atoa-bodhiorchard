@@ -32,6 +32,19 @@
             :class="{ 'pollen__heart--lost': n > lives }"
           >❤️</span>
         </span>
+        <span
+          class="pollen__missed"
+          :class="{ 'pollen__missed--danger': escapes >= POLLEN_ESCAPE_BUDGET - 1 }"
+          :title="`Let ${POLLEN_ESCAPE_BUDGET} flowers escape and you lose a heart`"
+        >
+          <span class="pollen__missed-label">missed</span>
+          <span
+            v-for="n in POLLEN_ESCAPE_BUDGET"
+            :key="n"
+            class="pollen__missed-pip"
+            :class="{ 'pollen__missed-pip--lit': n <= escapes }"
+          />
+        </span>
       </div>
       <span class="pollen__score">{{ score }} <small>popped</small></span>
     </div>
@@ -59,6 +72,13 @@
         :style="{ left: `${p.x}%`, top: `${p.y}%` }"
       >+1</span>
 
+      <span
+        v-for="f in escapeFlashes"
+        :key="f.id"
+        class="pollen__escape"
+        :style="{ left: `${f.x}%` }"
+      >🥀</span>
+
       <transition name="banner-pop">
         <div v-if="banner" :key="banner.id" class="pollen__banner" :class="`pollen__banner--${banner.kind}`">
           {{ banner.text }}
@@ -79,7 +99,7 @@
 
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
-import { MOTE_EMOJI, POLLEN_LIVES } from '@shared/minigames/pollen'
+import { MOTE_EMOJI, POLLEN_ESCAPE_BUDGET, POLLEN_LIVES } from '@shared/minigames/pollen'
 import type { MinigameResult } from '@/multiplayer/MinigameRoomClient'
 import { useMinigameRoom } from './useMinigameRoom'
 
@@ -98,12 +118,15 @@ interface RenderMote {
   vy: number
   x0: number
   start: number // local performance.now() at receipt
+  flashed?: boolean // already flashed its escape as it left the top
 }
 
 const motes = ref<RenderMote[]>([])
 const pops = ref<Array<{ id: number; x: number; y: number }>>([])
+const escapeFlashes = ref<Array<{ id: number; x: number }>>([]) // red wilts at the top
 const quota = ref(8) // pops needed to clear the current level
 const popsInLevel = ref(0) // server-confirmed pops toward the current quota
+const escapes = ref(0) // flowers missed this level (server count) — fills the meter
 const banner = ref<{ id: number; text: string; kind: 'level' | 'life' } | null>(null)
 const arena = ref<HTMLElement | null>(null)
 const result = ref<MinigameResult | null>(null)
@@ -118,6 +141,7 @@ const quotaPct = computed(() => Math.min(100, (popsInLevel.value / quota.value) 
 let raf = 0
 let started = false
 let popSeq = 1
+let escapeSeq = 1
 let bannerSeq = 1
 let bannerTimer = 0
 
@@ -148,8 +172,11 @@ function onEvent(type: string, payload: unknown): void {
       start: performance.now(),
     })
   } else if (type === 'pollen_despawn') {
-    const { id } = payload as { id: number }
-    motes.value = motes.value.filter((m) => m.id !== id)
+    // An escape: the server's running miss count drives the danger meter; the
+    // red wilt itself is flashed client-side in loop() as the flower leaves.
+    const p = payload as { id: number; escapes: number }
+    escapes.value = p.escapes
+    motes.value = motes.value.filter((m) => m.id !== p.id)
   } else if (type === 'pollen_popped') {
     const { id } = payload as { id: number }
     motes.value = motes.value.filter((m) => m.id !== id)
@@ -157,9 +184,11 @@ function onEvent(type: string, payload: unknown): void {
   } else if (type === 'pollen_levelup') {
     quota.value = (payload as { quota: number }).quota
     popsInLevel.value = 0
+    escapes.value = 0 // fresh miss meter each level
     showBanner(`⬆ Level ${(payload as { level: number }).level}!`, 'level')
   } else if (type === 'pollen_life') {
-    showBanner(`💔 ${(payload as { lives: number }).lives} left`, 'life')
+    escapes.value = 0 // budget blown → meter resets with the lost heart
+    showBanner('💔 too many got away!', 'life')
   }
 }
 
@@ -189,6 +218,16 @@ function loop(now: number): void {
       const e = (now - m.start) / 1000
       m.x = m.x0 + m.vx * e
       m.y = 104 - m.vy * e
+      // A flower slipping off the top unpopped = a miss. Flash a red wilt at the
+      // edge so the player sees it (the meter count comes from the server).
+      if (!m.flashed && m.y < 2) {
+        m.flashed = true
+        const fid = escapeSeq++
+        escapeFlashes.value.push({ id: fid, x: m.x })
+        window.setTimeout(() => {
+          escapeFlashes.value = escapeFlashes.value.filter((f) => f.id !== fid)
+        }, 650)
+      }
     }
     motes.value = motes.value.filter((m) => m.y > -8)
   }
@@ -230,6 +269,53 @@ onUnmounted(() => {
 .pollen__heart--lost {
   opacity: 0.25;
   filter: grayscale(1);
+}
+.pollen__missed {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding-left: 4px;
+}
+.pollen__missed-label {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  opacity: 0.55;
+}
+.pollen__missed-pip {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.15);
+  transition: background 0.15s;
+}
+.pollen__missed-pip--lit {
+  background: #e05050;
+}
+.pollen__missed--danger .pollen__missed-label {
+  opacity: 1;
+  color: #d23b3b;
+}
+.pollen__missed--danger .pollen__missed-pip--lit {
+  animation: missed-pulse 0.6s ease-in-out infinite;
+}
+@keyframes missed-pulse {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.35); }
+}
+.pollen__escape {
+  position: absolute;
+  top: 0;
+  font-size: 22px;
+  transform: translate(-50%, 0);
+  pointer-events: none;
+  animation: escape-wilt 0.65s ease-out forwards;
+}
+@keyframes escape-wilt {
+  0% { transform: translate(-50%, 6px) scale(1); opacity: 0; }
+  25% { opacity: 1; }
+  100% { transform: translate(-50%, -10px) scale(0.7); opacity: 0; }
 }
 .pollen__score {
   font-size: 20px;

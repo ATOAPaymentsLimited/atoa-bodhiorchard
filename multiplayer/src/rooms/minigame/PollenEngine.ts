@@ -90,8 +90,10 @@ export class PollenEngine implements MinigameEngine {
     for (const [id, mote] of this.motes) {
       if (isMoteAlive(mote, nowMs)) continue
       this.motes.delete(id)
-      host.notify("pollen_despawn", { id })
       this.escapes += 1
+      // Tell the client this was an escape and how full the level's miss meter
+      // now is, so it can show the danger building toward a lost life.
+      host.notify("pollen_despawn", { id, escapes: this.escapes, budget: POLLEN_ESCAPE_BUDGET })
       if (this.escapes >= POLLEN_ESCAPE_BUDGET) {
         this.escapes = 0
         this.lives -= 1
