@@ -34,6 +34,7 @@ export interface MinigameRoomHandle {
   status: Ref<MinigameStatus>
   score: Ref<number>
   round: Ref<number>
+  lives: Ref<number>
   send: (type: string, payload?: unknown) => void
 }
 
@@ -43,16 +44,21 @@ export function useMinigameRoom(
     onEvent: (type: string, payload: unknown) => void
     onResult: (result: MinigameResult) => void
   },
+  opts: { startingLives?: number } = {},
 ): MinigameRoomHandle {
   const authStore = useAuthStore()
   const client = new MinigameRoomClient()
   const status = ref<MinigameStatus>('connecting')
   const score = ref(0)
   const round = ref(0)
+  // Seed lives at the game's starting count so the hearts HUD reads full before
+  // the first authoritative snapshot arrives (the server overwrites it at once).
+  const lives = ref(opts.startingLives ?? 0)
 
   client.onState = (s) => {
     score.value = s.score
     round.value = s.round
+    lives.value = s.lives
     if (s.phase === 'finished') status.value = 'finished'
     else if (status.value === 'connecting') status.value = 'playing'
   }
@@ -85,6 +91,7 @@ export function useMinigameRoom(
     status,
     score,
     round,
+    lives,
     send: (type, payload) => client.send(type, payload),
   }
 }

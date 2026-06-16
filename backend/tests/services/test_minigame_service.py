@@ -50,16 +50,16 @@ async def test_submit_rejects_unknown_game() -> None:
 async def test_submit_rejects_out_of_range_score() -> None:
     db = AsyncMock()
     with pytest.raises(MinigameValidationError, match="score out of range"):
-        await submit_score(db, user_id=USER_ID, org_id=ORG_ID, game="fishing", score=1001)
+        await submit_score(db, user_id=USER_ID, org_id=ORG_ID, game="fishing", score=6001)
 
 
 async def test_submit_rejects_score_above_per_game_max() -> None:
     # Defense-in-depth: a score above THIS game's own max is refused even though
-    # it's a small number — fishing tops out at 50, so 200 is impossible.
+    # it's a small number — Firefly tops out at 50, so 200 is impossible.
     db = AsyncMock()
-    assert GAMES["fishing"].max_score == 50
+    assert GAMES["firefly"].max_score == 50
     with pytest.raises(MinigameValidationError, match="score out of range"):
-        await submit_score(db, user_id=USER_ID, org_id=ORG_ID, game="fishing", score=200)
+        await submit_score(db, user_id=USER_ID, org_id=ORG_ID, game="firefly", score=200)
 
 
 async def test_submit_records_play_and_returns_best_streak() -> None:
