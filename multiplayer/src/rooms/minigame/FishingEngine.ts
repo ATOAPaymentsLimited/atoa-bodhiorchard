@@ -32,9 +32,10 @@ const MAX_CAST_MS = 20000
 const RESULT_PAUSE_MS = 700
 /** How far the client's reported in-cast time may diverge from the server's own
  *  measure before we stop trusting it. Wide enough to absorb real network
- *  latency (the #261 fairness fix), tight enough that a bot can't wait and then
- *  claim a perfect past time — it must hook in real time. */
-const LATENCY_GRACE_MS = 400
+ *  latency (the #261 fairness fix — covers even poor mobile RTT), tight enough
+ *  that a bot can't wait and then claim a perfect past time: it must hook in
+ *  real time. */
+const LATENCY_GRACE_MS = 600
 
 /**
  * Server-authoritative Lake Fishing. The server owns the strike zone (its RNG)
