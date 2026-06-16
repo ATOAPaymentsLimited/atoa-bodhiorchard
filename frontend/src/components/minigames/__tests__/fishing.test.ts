@@ -14,14 +14,14 @@
 
 import { describe, expect, it } from 'vitest'
 import {
-  FISHING_MAX_SCORE,
   ZONE_WIDTH,
   bobberPositionAt,
   randomPhase,
   randomSweepRate,
   randomZoneStart,
   scoreForHook,
-  sweepRateForCast,
+  sweepRateForLevel,
+  zoneWidthForLevel,
 } from '@shared/minigames/fishing'
 
 describe('bobberPositionAt', () => {
@@ -48,18 +48,33 @@ describe('bobberPositionAt', () => {
     }
   })
 
-  it('later casts sweep faster (base rate)', () => {
-    expect(sweepRateForCast(4)).toBeGreaterThan(sweepRateForCast(0))
+  it('later levels sweep faster (base rate)', () => {
+    expect(sweepRateForLevel(5)).toBeGreaterThan(sweepRateForLevel(1))
+  })
+})
+
+describe('sweepRateForLevel', () => {
+  it('climbs with level but is capped so endless never means unrenderable', () => {
+    expect(sweepRateForLevel(2)).toBeGreaterThan(sweepRateForLevel(1))
+    expect(sweepRateForLevel(999)).toBeLessThanOrEqual(3.2)
+  })
+})
+
+describe('zoneWidthForLevel', () => {
+  it('narrows the target as the level climbs, down to a floor', () => {
+    expect(zoneWidthForLevel(1)).toBeCloseTo(ZONE_WIDTH, 6)
+    expect(zoneWidthForLevel(3)).toBeLessThan(zoneWidthForLevel(1))
+    expect(zoneWidthForLevel(999)).toBeGreaterThanOrEqual(0.07) // never below the floor
   })
 })
 
 describe('randomSweepRate', () => {
-  it('jitters around the per-cast base and is always positive', () => {
-    const base = sweepRateForCast(2)
+  it('jitters around the per-level base and is always positive', () => {
+    const base = sweepRateForLevel(2)
     expect(randomSweepRate(2, () => 0)).toBeCloseTo(base * 0.85, 6) // slow extreme
     expect(randomSweepRate(2, () => 1)).toBeCloseTo(base * 1.35, 6) // fast extreme
     expect(randomSweepRate(2, () => 0.5)).toBeCloseTo(base * 1.1, 6)
-    expect(randomSweepRate(0, () => 0)).toBeGreaterThan(0)
+    expect(randomSweepRate(1, () => 0)).toBeGreaterThan(0)
   })
 })
 
@@ -91,17 +106,13 @@ describe('scoreForHook', () => {
 })
 
 describe('randomZoneStart', () => {
-  it('keeps the whole zone on the water for any rng value', () => {
+  it('keeps the whole zone on the water for any rng value and width', () => {
     for (const r of [0, 0.25, 0.5, 0.75, 0.999]) {
-      const start = randomZoneStart(() => r)
-      expect(start).toBeGreaterThanOrEqual(0)
-      expect(start + ZONE_WIDTH).toBeLessThanOrEqual(1)
+      for (const w of [ZONE_WIDTH, zoneWidthForLevel(5), 0.07]) {
+        const start = randomZoneStart(() => r, w)
+        expect(start).toBeGreaterThanOrEqual(0)
+        expect(start + w).toBeLessThanOrEqual(1)
+      }
     }
-  })
-})
-
-describe('FISHING_MAX_SCORE', () => {
-  it('is five perfect casts', () => {
-    expect(FISHING_MAX_SCORE).toBe(50)
   })
 })
