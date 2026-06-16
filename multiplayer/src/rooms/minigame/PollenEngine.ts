@@ -24,11 +24,20 @@ import {
 } from "../../../../shared/minigames/pollen"
 import type { MinigameEngine, MinigameHost } from "./MinigameEngine"
 
+/** A pop sooner than this after the mote spawned can't be a human seeing and
+ *  reacting to it — only a script auto-popping the spawn message. */
+const POP_MIN_REACTION_MS = 120
+/** Minimum gap between two scored pops (~14/sec ceiling). Humans tap ~6-8/sec;
+ *  this only bites a burst-popping script. */
+const POP_MIN_GAP_MS = 70
+
 /**
  * Server-authoritative Pollen Pop. The server owns the mote field: it spawns
  * motes (its RNG) and streams them; the client renders but never invents motes.
  * A pop is validated against the server's live set at the server's clock, so a
- * mote that never existed or already drifted off-screen can't be popped.
+ * mote that never existed or already drifted off-screen can't be popped — and a
+ * pop faster than a human could see/click is dropped as a bot (the mote lives on
+ * and just escapes), so auto-popping the spawn stream scores nothing.
  *
  * Levels + lives: clearing a per-level pop quota advances the level (quicker,
  * jittered cadence and faster-rising motes, density still capped), so the late
@@ -47,6 +56,7 @@ export class PollenEngine implements MinigameEngine {
   private ended = false
   private startMs = 0
   private lastSpawnMs = 0
+  private lastPopMs = Number.NEGATIVE_INFINITY
 
   constructor(
     private readonly rng: () => number = Math.random,
@@ -61,6 +71,7 @@ export class PollenEngine implements MinigameEngine {
     this.levelPops = 0
     this.escapes = 0
     this.lives = POLLEN_LIVES
+    this.lastPopMs = Number.NEGATIVE_INFINITY
     this.ended = false
     host.state.round = this.level
     host.state.lives = this.lives
@@ -109,8 +120,15 @@ export class PollenEngine implements MinigameEngine {
     if (this.ended || type !== "pop") return
     const id = readId(payload)
     if (id === null) return
+    const now = this.now()
     const mote = this.motes.get(id)
-    if (!mote || !isMoteAlive(mote, this.now())) return
+    if (!mote || !isMoteAlive(mote, now)) return
+    // Plausibility guards: a pop sooner than a human could see and react to the
+    // mote, or faster than a human can click, is a bot — drop it. The mote stays
+    // live (and just escapes), so auto-popping the spawn stream earns nothing.
+    if (now - mote.spawnAtMs < POP_MIN_REACTION_MS) return
+    if (now - this.lastPopMs < POP_MIN_GAP_MS) return
+    this.lastPopMs = now
     this.motes.delete(id)
     this.score += 1
     this.levelPops += 1

@@ -124,20 +124,33 @@ describe("FishingEngine", () => {
     expect(engine.finalScore()).toBe(0)
   })
 
-  it("scores from the client's in-cast time, immune to server latency", () => {
+  it("honours the client's in-cast time within the latency grace", () => {
     let clock = 0
     // zone centred at 0.5 (rng 0.5 → zoneStart 0.42).
     const engine = new FishingEngine(() => 0.5, () => clock)
     const { host, sent } = makeHost()
     engine.start(host) // cast 0, castStartMs = 0
-    // 5s elapsed server-side (latency), but the client hooked at the very start
-    // (bobber at 0.5 = bullseye). Scoring at the server's own 5000ms clock would
-    // put the bobber well off-centre (a worse band); using the client's reported
-    // moment it's a bullseye.
-    clock = 5000
+    // 250ms of network latency, but the client hooked at the very start (bobber
+    // at 0.5 = bullseye). The reported time agrees with the server's measure
+    // within the grace, so it's honoured — lag doesn't punish a correct tap.
+    clock = 250
     engine.input(host, "hook", { elapsedMs: 0 })
     const r = last(sent, "fishing_result")?.message as { points: number }
     expect(r.points).toBe(10)
+  })
+
+  it("rejects a hooked time banked far from when the hook arrived", () => {
+    let clock = 0
+    const engine = new FishingEngine(() => 0.5, () => clock)
+    const { host, sent } = makeHost()
+    engine.start(host) // castStartMs = 0; elapsed 0 would be a bullseye
+    // A bot waits 5s, then claims the perfect elapsed (0). That's far outside the
+    // latency grace, so the claim is dropped and the hook is scored at the real
+    // arrival time — not the banked bullseye.
+    clock = 5000
+    engine.input(host, "hook", { elapsedMs: 0 })
+    const r = last(sent, "fishing_result")?.message as { points: number }
+    expect(r.points).toBeLessThan(10)
   })
 
   it("clamps a client-reported time to the server-measured window", () => {
@@ -161,11 +174,13 @@ describe("PollenEngine", () => {
     expect(state.round).toBe(1)
 
     // rng 0.5 → neutral jitter, so a mote (id = i) spawns each 600ms interval.
-    // Pop each the instant it spawns (still alive) to clear level 1's quota.
+    // Tick to spawn it, wait a human reaction beat (clears the reaction floor),
+    // then pop it — clearing level 1's quota.
     const quota = quotaForLevel(1)
     for (let i = 1; i <= quota; i++) {
       clock += 600
       engine.tick(host, clock)
+      clock += 130
       engine.input(host, "pop", { id: i })
     }
     expect(state.score).toBe(quota)
@@ -175,6 +190,38 @@ describe("PollenEngine", () => {
     engine.input(host, "pop", { id: 1 })
     engine.input(host, "pop", { id: 9999 })
     expect(state.score).toBe(quota)
+  })
+
+  it("drops pops below human reaction or click speed", () => {
+    let clock = 0
+    const engine = new PollenEngine(() => 0.5, () => clock)
+    const { host, state } = makeHost()
+    engine.start(host)
+    clock = 600
+    engine.tick(host, 600) // mote id 1 spawns at 600
+    clock = 1200
+    engine.tick(host, 1200) // mote id 2 spawns at 1200
+
+    // Reaction floor: id 2 popped 40ms after it spawned → dropped as a bot.
+    clock = 1240
+    engine.input(host, "pop", { id: 2 })
+    expect(state.score).toBe(0)
+
+    // id 1 is 660ms old → a human-plausible pop scores.
+    clock = 1260
+    engine.input(host, "pop", { id: 1 })
+    expect(state.score).toBe(1)
+
+    // Rate cap: id 2 now clears the reaction floor (125ms old) but the pop lands
+    // 65ms after the last scored one → above human click speed → dropped.
+    clock = 1325
+    engine.input(host, "pop", { id: 2 })
+    expect(state.score).toBe(1)
+
+    // 80ms after the last scored pop → within human speed → scored.
+    clock = 1340
+    engine.input(host, "pop", { id: 2 })
+    expect(state.score).toBe(2)
   })
 
   it("loses a life when escapes blow the budget, ending at zero lives", () => {
