@@ -62,9 +62,7 @@ async def _seed_user(db: AsyncSession, org_id: uuid.UUID, *, role_name: str) -> 
     db.add(user)
     await db.flush()
     role = (
-        await db.execute(
-            select(Role).where(Role.name == role_name, Role.org_id == org_id)
-        )
+        await db.execute(select(Role).where(Role.name == role_name, Role.org_id == org_id))
     ).scalar_one_or_none()
     if role is None:
         role = Role(name=role_name, org_id=org_id, scope_type=RoleScopeType.SYSTEM)
@@ -88,12 +86,16 @@ async def _sp_ledger(
 ) -> dict[str, float]:
     async with factory() as db:
         rows = (
-            await db.execute(
-                select(RewardEvent).where(
-                    RewardEvent.org_id == org_id, RewardEvent.type == RewardType.SP
+            (
+                await db.execute(
+                    select(RewardEvent).where(
+                        RewardEvent.org_id == org_id, RewardEvent.type == RewardType.SP
+                    )
                 )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
     return {r.source_ref: float(r.amount) for r in rows if r.source_ref}
 
 
@@ -102,13 +104,17 @@ async def _design_events(
 ) -> list[BUDTimelineEvent]:
     async with factory() as db:
         rows = (
-            await db.execute(
-                select(BUDTimelineEvent).where(
-                    BUDTimelineEvent.bud_id == bud_id,
-                    BUDTimelineEvent.event_type == "design_updated",
+            (
+                await db.execute(
+                    select(BUDTimelineEvent).where(
+                        BUDTimelineEvent.bud_id == bud_id,
+                        BUDTimelineEvent.event_type == "design_updated",
+                    )
                 )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
     return list(rows)
 
 
@@ -122,6 +128,7 @@ async def test_bug_rejected_penalizes_qa_reporter(
         qa = await _seed_user(db, org_id, role_name="qa")
         bug = Bug(
             org_id=org_id,
+            bug_number=1,
             title="prod bug",
             reporter_id=qa.id,
             bug_type=BugType.PRODUCTION,
@@ -154,6 +161,7 @@ async def test_production_bug_closed_rewards_qa_reporter(
         qa = await _seed_user(db, org_id, role_name="qa")
         bug = Bug(
             org_id=org_id,
+            bug_number=1,
             title="prod bug",
             reporter_id=qa.id,
             bug_type=BugType.PRODUCTION,
@@ -191,9 +199,7 @@ async def test_mcp_design_write_records_design_updated(
         org_obj = await db.get(Organization, org_id)
         des_user = await db.get(User, designer.id)
         auth = MCPAuthResult(org=org_obj, user=des_user)
-        await handle_write_bud_design(
-            db, auth, {"bud_id": str(bud_id), "html": "<div>x</div>"}
-        )
+        await handle_write_bud_design(db, auth, {"bud_id": str(bud_id), "html": "<div>x</div>"})
 
     events = await _design_events(factory, bud_id)
     assert len(events) == 1

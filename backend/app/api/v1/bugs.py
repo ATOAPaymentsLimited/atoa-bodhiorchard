@@ -310,11 +310,7 @@ async def update_bug(
     # Stamp ``rejected_at`` on first transition to rejected. This marks the
     # bug as never-valid (vs ``closed`` = fixed) and is the signal the QA
     # false-positive SP penalty keys off.
-    if (
-        "status" in update
-        and update["status"] == BugStatus.REJECTED
-        and not bug.rejected_at
-    ):
+    if "status" in update and update["status"] == BugStatus.REJECTED and not bug.rejected_at:
         update["rejected_at"] = datetime.now(UTC)
 
     for field, value in update.items():

@@ -99,8 +99,7 @@ def _build_prompt(todos: list[TodoForJudgment], reviewers: list[str]) -> str:
     blast radius of any leakage is bounded.
     """
     todo_lines = "\n".join(
-        f'- id="{t.todo_id}" title={t.title!r} description={t.description[:300]!r}'
-        for t in todos
+        f'- id="{t.todo_id}" title={t.title!r} description={t.description[:300]!r}' for t in todos
     )
     reviewer_lines = "\n".join(f"- {login}" for login in reviewers) or "(none)"
     return (

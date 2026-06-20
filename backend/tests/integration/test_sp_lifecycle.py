@@ -69,9 +69,7 @@ async def _add_user(
         # One SYSTEM role per (name, org) — uq_roles_name_org forbids dupes, so
         # multiple users sharing a role (e.g. two developers) reuse the row.
         existing = (
-            await db.execute(
-                select(Role).where(Role.name == role_name, Role.org_id == org_id)
-            )
+            await db.execute(select(Role).where(Role.name == role_name, Role.org_id == org_id))
         ).scalar_one_or_none()
         if existing is not None:
             role_id = existing.id
@@ -115,13 +113,17 @@ async def _sp_ledger(
     """Map ``source_ref → amount`` for every SP reward event in the org."""
     async with factory() as db:
         rows = (
-            await db.execute(
-                select(RewardEvent).where(
-                    RewardEvent.org_id == org_id,
-                    RewardEvent.type == RewardType.SP,
+            (
+                await db.execute(
+                    select(RewardEvent).where(
+                        RewardEvent.org_id == org_id,
+                        RewardEvent.type == RewardType.SP,
+                    )
                 )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
     return {r.source_ref: float(r.amount) for r in rows if r.source_ref}
 
 
@@ -179,6 +181,7 @@ async def test_developer_sp_split_and_rules_on_close(
                 Bug(
                     org_id=org_id,
                     bud_id=bud_id,
+                    bug_number=i + 1,
                     title=f"minor bug {i}",
                     reporter_id=dev1,
                     bug_type=BugType.TESTING,
@@ -259,6 +262,7 @@ async def test_over_threshold_bugs_penalize_developers(
                 Bug(
                     org_id=org_id,
                     bud_id=bud_id,
+                    bug_number=i + 1,
                     title=f"bug {i}",
                     reporter_id=dev1,
                     bug_type=BugType.TESTING,
@@ -320,6 +324,7 @@ async def test_qa_close_time_rules(
                 Bug(
                     org_id=org_id,
                     bud_id=bud_id,
+                    bug_number=i + 1,
                     title=f"qa bug {i}",
                     reporter_id=qa,
                     bug_type=BugType.TESTING,

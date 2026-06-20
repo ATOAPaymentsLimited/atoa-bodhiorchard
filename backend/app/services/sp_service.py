@@ -141,4 +141,3 @@ async def get_user_role(
     """Resolve a user's role within an org. Returns role string or 'developer' as default."""
     role = await UserRepository(db).get_role(user_id, org_id)
     return role.value if role else "developer"
-
