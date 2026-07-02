@@ -19,8 +19,8 @@
     <v-icon icon="mdi-robot-outline" size="48" color="primary" class="mb-4" />
     <h2 class="text-h5 font-weight-bold bo-display mb-2">AI Engine</h2>
     <p class="text-body-2 text-medium-emphasis mb-6 text-center" style="max-width: 520px;">
-      Bodhiorchard uses Claude to analyze your codebase.
-      We detected how the backend is running and prefilled the right option.
+      Bodhiorchard uses an AI coding agent to analyze your codebase.
+      Pick a provider — we detected how the backend is running and prefilled the right auth option.
     </p>
 
     <v-card
@@ -59,9 +59,51 @@
       </template>
 
       <template v-else>
-        <!-- Both modes get a chooser: host picks Hybrid login vs Cloud API key;
-             Docker picks Cloud API key vs Claude subscription token (a container
-             can't reach a host claude login, but a pasted token works). -->
+        <!-- Step 1: which agent CLI runs the tasks. -->
+        <div class="section-label mb-2">
+          <span class="section-label__num">1</span> Provider
+        </div>
+        <div
+          v-if="providerOptions.length"
+          role="radiogroup"
+          aria-label="AI provider"
+          class="auth-mode-tiles mb-5"
+        >
+          <button
+            v-for="prov in providerOptions"
+            :key="prov.value"
+            type="button"
+            role="radio"
+            :aria-checked="provider === prov.value"
+            class="auth-tile"
+            :class="{ 'auth-tile--active': provider === prov.value }"
+            @click="selectProvider(prov.value)"
+            @keydown.space.prevent="selectProvider(prov.value)"
+          >
+            <div class="auth-tile__indicator">
+              <v-icon
+                :icon="provider === prov.value ? 'mdi-radiobox-marked' : 'mdi-radiobox-blank'"
+                :color="provider === prov.value ? 'primary' : undefined"
+                size="20"
+              />
+            </div>
+            <div class="auth-tile__body">
+              <div class="auth-tile__header">
+                <v-icon :icon="prov.icon" size="18" class="auth-tile__icon" />
+                <span class="text-body-2 font-weight-medium">{{ prov.title }}</span>
+              </div>
+              <div class="text-caption text-medium-emphasis auth-tile__desc">
+                Runs via the <code>{{ prov.cli }}</code> CLI.
+              </div>
+            </div>
+          </button>
+        </div>
+
+        <!-- Step 2: how the backend authenticates with the selected provider. -->
+        <v-divider class="mb-4" />
+        <div class="section-label mb-2">
+          <span class="section-label__num">2</span> Authentication
+        </div>
         <div
           v-if="showAuthChooser"
           role="radiogroup"
@@ -122,39 +164,19 @@
             is stored in the database.
           </div>
         </v-alert>
-        <template v-else-if="authMode === 'subscription'">
-          <v-alert
-            type="info"
-            variant="tonal"
-            density="compact"
-            class="mb-4"
-            icon="mdi-account-key-outline"
-          >
-            <div class="text-body-2">
-              Uses your Claude Pro/Max subscription via an OAuth token — no
-              per-token API bill. The token is encrypted on your org.
-            </div>
-          </v-alert>
-          <v-alert
-            type="warning"
-            variant="tonal"
-            density="compact"
-            class="mb-4"
-            icon="mdi-clock-alert-outline"
-          >
-            <div class="text-body-2">
-              From <strong>June 15, 2026</strong>, automated agent runs on a
-              Claude subscription draw from a monthly Agent-SDK credit. For
-              unmetered use, run the backend on your host
-              (<a
-                href="https://github.com/mickyarun/bodhiorchard#hybrid-mode-hot-reload"
-                target="_blank"
-                rel="noopener"
-                class="text-primary"
-              >hybrid setup</a>) or use an API key.
-            </div>
-          </v-alert>
-        </template>
+        <v-alert
+          v-else-if="authMode === 'subscription'"
+          type="info"
+          variant="tonal"
+          density="compact"
+          class="mb-4"
+          icon="mdi-account-key-outline"
+        >
+          <div class="text-body-2">
+            Uses your Claude Pro/Max subscription via an OAuth token — no
+            per-token API bill. The token is encrypted on your org.
+          </div>
+        </v-alert>
         <v-alert
           v-else
           type="info"
@@ -164,17 +186,16 @@
           icon="mdi-cloud-outline"
         >
           <div class="text-body-2">
-            Call the Anthropic API directly. The key is encrypted on your org
-            and applied to every agent run.
+            The {{ credentialLabel }} is encrypted on your org and applied to
+            every agent run.
           </div>
         </v-alert>
 
-        <!-- API key entry — shown whenever the active mode is api_key -->
+        <!-- Credential entry — shown whenever the active mode is api_key -->
         <template v-if="authMode === 'api_key'">
           <v-text-field
             v-model="apiKey"
-            label="Anthropic API key"
-            placeholder="sk-ant-…"
+            :label="credentialLabel"
             type="password"
             variant="outlined"
             density="comfortable"
@@ -184,7 +205,7 @@
             class="mb-2"
             :readonly="setupStore.orgInitDone"
           />
-          <div class="text-caption text-medium-emphasis mb-4 ml-1">
+          <div v-if="isClaude" class="text-caption text-medium-emphasis mb-4 ml-1">
             <v-icon icon="mdi-open-in-new" size="12" class="mr-1" />
             <a
               href="https://console.anthropic.com/settings/keys"
@@ -220,6 +241,16 @@
           </div>
         </template>
 
+        <!-- How to connect — provider + auth-mode specific steps -->
+        <div v-if="connectSteps.length" class="connect-steps mb-3">
+          <div class="text-caption font-weight-medium mb-1">How to connect</div>
+          <ol class="connect-steps__list">
+            <li v-for="(step, i) in connectSteps" :key="i" class="text-caption text-medium-emphasis">
+              {{ step }}
+            </li>
+          </ol>
+        </div>
+
         <v-btn
           :color="testStatus === 'passed' ? 'success' : 'primary'"
           :loading="testStatus === 'checking'"
@@ -244,7 +275,8 @@
             icon="mdi-check-decagram"
           >
             <div class="text-body-2">
-              Connected to Claude <strong>{{ claudeVersion }}</strong>.
+              Connected to <strong>{{ providerTitle }}</strong>
+              <span v-if="claudeVersion"> ({{ claudeVersion }})</span>.
             </div>
           </v-alert>
         </div>
@@ -258,13 +290,6 @@
             icon="mdi-alert-circle-outline"
           >
             <div class="text-body-2">{{ failureMessage }}</div>
-            <div
-              v-if="deploymentMode === 'host' && authMode === 'host' && showHostInstallHint"
-              class="text-caption mt-2"
-            >
-              Install the CLI on your host:
-              <code class="text-primary">curl -fsSL https://claude.ai/install.sh | bash</code>
-            </div>
           </v-alert>
         </div>
       </v-expand-transition>
@@ -278,12 +303,6 @@
       <div class="d-flex flex-wrap ga-2 coming-soon-row">
         <v-chip variant="outlined" size="small" prepend-icon="mdi-server-outline">
           Ollama
-          <template #append>
-            <v-chip size="x-small" variant="tonal" color="primary" class="ml-2">Soon</v-chip>
-          </template>
-        </v-chip>
-        <v-chip variant="outlined" size="small" prepend-icon="mdi-code-braces">
-          Codex
           <template #append>
             <v-chip size="x-small" variant="tonal" color="primary" class="ml-2">Soon</v-chip>
           </template>
@@ -319,6 +338,120 @@ const oauthToken = computed<string>({
   set: (v) => { setupStore.state.claude.oauthToken = v },
 })
 
+const provider = computed<string>({
+  get: () => setupStore.state.claude.provider,
+  set: (v) => { setupStore.state.claude.provider = v },
+})
+
+interface CapAuthMode { value: string; label: string; requires_secret: boolean }
+interface CapProvider {
+  provider: string
+  cli: string
+  auth_modes: CapAuthMode[]
+  install_hint: string
+}
+const providersCaps = ref<CapProvider[]>([])
+
+const PROVIDER_META: Record<string, { title: string; icon: string }> = {
+  claude: { title: 'Claude', icon: 'mdi-robot-happy-outline' },
+  copilot: { title: 'GitHub Copilot', icon: 'mdi-github' },
+  codex: { title: 'OpenAI Codex', icon: 'mdi-alpha-c-box-outline' },
+}
+const MODE_ICONS: Record<string, string> = {
+  host: 'mdi-laptop',
+  api_key: 'mdi-cloud-outline',
+  subscription: 'mdi-account-key-outline',
+}
+
+const currentCaps = computed<CapProvider | undefined>(() =>
+  providersCaps.value.find((p) => p.provider === provider.value),
+)
+const isClaude = computed(() => provider.value === 'claude')
+
+const providerOptions = computed(() =>
+  providersCaps.value.map((p) => ({
+    value: p.provider,
+    title: PROVIDER_META[p.provider]?.title ?? p.provider,
+    icon: PROVIDER_META[p.provider]?.icon ?? 'mdi-robot',
+    cli: p.cli,
+  })),
+)
+
+const credentialLabel = computed(() => {
+  const apiMode = currentCaps.value?.auth_modes.find((m) => m.value === 'api_key')
+  return apiMode?.label ?? 'API key'
+})
+
+const providerTitle = computed(() => PROVIDER_META[provider.value]?.title ?? provider.value)
+
+// Provider + auth-mode specific "how to connect" steps shown above the test
+// button. Plain strings (no markup) — kept short and copy-pasteable.
+const connectSteps = computed<string[]>(() => {
+  const p = provider.value
+  const m = authMode.value
+  if (p === 'copilot') {
+    if (m === 'host') {
+      return [
+        'Install the Copilot CLI on the host: npm i -g @github/copilot',
+        'Sign in with the GitHub CLI: gh auth login (or set GH_TOKEN). The account needs an active Copilot plan with the "Copilot in the CLI" policy enabled.',
+        'Click "Test connection" below.',
+      ]
+    }
+    return [
+      'Create a GitHub token with Copilot access at github.com/settings/tokens.',
+      'Paste it in the field above, then click "Test connection".',
+    ]
+  }
+  if (p === 'codex') {
+    if (m === 'host') {
+      return [
+        'Install the Codex CLI on the host: npm i -g @openai/codex',
+        'Sign in: run "codex" once and complete the login (saved in ~/.codex).',
+        'Click "Test connection" below.',
+      ]
+    }
+    return [
+      'Create an OpenAI API key at platform.openai.com/api-keys.',
+      'Paste it in the field above, then click "Test connection".',
+    ]
+  }
+  // claude
+  if (m === 'host') {
+    return [
+      'Install Claude Code on the host: curl -fsSL https://claude.ai/install.sh | bash',
+      'Sign in: run "claude login" (or set ANTHROPIC_API_KEY).',
+      'Click "Test connection" below.',
+    ]
+  }
+  if (m === 'subscription') {
+    return [
+      'Run "npx @anthropic-ai/claude-code setup-token" and authorize in the browser.',
+      'Paste the token above, then click "Test connection".',
+    ]
+  }
+  return [
+    'Create an Anthropic API key at console.anthropic.com.',
+    'Paste it above, then click "Test connection".',
+  ]
+})
+
+function recommendedMode(caps: CapProvider): ClaudeAuthMode {
+  if (deploymentMode.value === 'docker') {
+    const cred = caps.auth_modes.find((m) => m.requires_secret)
+    return (cred?.value ?? 'api_key') as ClaudeAuthMode
+  }
+  return (caps.auth_modes.find((m) => m.value === 'host')?.value ?? 'host') as ClaudeAuthMode
+}
+
+function selectProvider(value: string): void {
+  if (provider.value === value) return
+  provider.value = value
+  setupStore.state.claude.apiKey = ''
+  setupStore.state.claude.oauthToken = ''
+  const caps = providersCaps.value.find((p) => p.provider === value)
+  if (caps) authMode.value = recommendedMode(caps)
+}
+
 // Hydrate from the persisted store so navigating away and back to this step
 // keeps the user's prior "Connected" feedback. Failures are treated as
 // transient and not persisted — the user should re-test on revisit.
@@ -332,7 +465,11 @@ const cliUnavailable = ref(false)
 // Re-prompt a new test whenever the user edits the key or flips auth mode —
 // the prior pass/fail no longer reflects the current selection. Also clear
 // the persisted "passed" flag so the green state can't survive stale inputs.
-watch([apiKey, oauthToken, authMode], () => {
+// Reset the prior pass/fail whenever the selection changes — including the
+// PROVIDER, since two providers can share an auth mode (e.g. both default to
+// host), in which case nothing else here would change and a stale "Connected"
+// would linger.
+watch([provider, apiKey, oauthToken, authMode], () => {
   if (testStatus.value !== 'idle' && testStatus.value !== 'checking') {
     testStatus.value = 'idle'
     testError.value = ''
@@ -354,43 +491,29 @@ interface AuthOption {
   badge?: string
 }
 
-const authOptions = computed<ReadonlyArray<AuthOption>>(() => {
-  if (deploymentMode.value === 'docker') {
-    return [
-      {
-        value: 'api_key',
-        title: 'Cloud API key',
-        icon: 'mdi-cloud-outline',
-        badge: 'No usage cap',
-        description:
-          'Paste an Anthropic API key. Pay-per-token via the API — no monthly limit.',
-      },
-      {
-        value: 'subscription',
-        title: 'Claude Code subscription',
-        icon: 'mdi-account-key-outline',
-        description:
-          'Paste an OAuth token from `claude setup-token`. Uses your Claude Pro/Max plan.',
-      },
-    ]
+function modeDescription(mode: CapAuthMode): string {
+  if (!mode.requires_secret) {
+    return "Uses the host machine's CLI login / process env. Nothing is stored."
   }
-  return [
-    {
-      value: 'host',
-      title: 'Hybrid / host login',
-      icon: 'mdi-laptop',
-      badge: 'Recommended',
-      description:
-        "Uses the host machine's claude login session. Best for Claude Pro/Max subscribers — nothing is stored.",
-    },
-    {
-      value: 'api_key',
-      title: 'Cloud API key',
-      icon: 'mdi-cloud-outline',
-      description:
-        'Paste an Anthropic API key. Stored encrypted with Fernet AES-128 and applied to every agent run.',
-    },
-  ]
+  if (mode.value === 'subscription') {
+    return 'Paste an OAuth token from `claude setup-token`. Uses your Claude plan.'
+  }
+  return `Paste a ${mode.label}. Stored encrypted and applied to every agent run.`
+}
+
+const authOptions = computed<ReadonlyArray<AuthOption>>(() => {
+  const caps = currentCaps.value
+  if (!caps) return []
+  const recommended = recommendedMode(caps)
+  return caps.auth_modes
+    .filter((m) => !(deploymentMode.value === 'docker' && m.value === 'host'))
+    .map((m) => ({
+      value: m.value as ClaudeAuthMode,
+      title: m.label,
+      icon: MODE_ICONS[m.value] ?? 'mdi-key',
+      description: modeDescription(m),
+      badge: m.value === recommended ? 'Recommended' : undefined,
+    }))
 })
 
 const headerBadge = computed<{ label: string; color: string; icon: string } | null>(() => {
@@ -419,15 +542,13 @@ const buttonLabel = computed<string>(() => {
   return 'Test host connection'
 })
 
-// In host-login mode, surface the "install CLI on host" hint only when the
-// CLI itself is missing — not when the CLI exists but auth fails.
-const showHostInstallHint = computed(() => cliUnavailable.value)
-
 const failureMessage = computed<string>(() => {
   if (cliUnavailable.value) {
+    // Backend returns the provider-specific install hint as the error.
+    if (testError.value) return testError.value
     return deploymentMode.value === 'docker'
-      ? 'The Claude CLI is missing from the backend container. Rebuild the backend image (docker compose build backend) and try again.'
-      : 'Claude Code CLI not found on the host. Install it and retry.'
+      ? `The ${providerTitle.value} CLI is missing from the backend container. Rebuild the backend image (docker compose build backend) and try again.`
+      : `${providerTitle.value} CLI not found on the host. Install it and retry.`
   }
   if (authMode.value === 'api_key') {
     if (testError.value.toLowerCase().includes('not logged in')) {
@@ -452,15 +573,14 @@ onMounted(async () => {
 
 async function detectDeployment(): Promise<void> {
   try {
-    const { data } = await api.get('/setup/deployment-info')
-    deploymentMode.value = data.mode === 'docker' ? 'docker' : 'host'
-    // Apply the backend's recommended auth mode only on the first visit.
-    // On later remounts, respect whatever the user explicitly chose.
+    const { data } = await api.get('/setup/ai-capabilities')
+    deploymentMode.value = data.deployment_mode === 'docker' ? 'docker' : 'host'
+    providersCaps.value = data.providers ?? []
+    // Apply the recommended auth mode for the selected provider only on the
+    // first visit. On later remounts, respect the user's explicit choice.
     if (!setupStore.state.claude.initialized) {
-      const recommended: ClaudeAuthMode = data.claude_auth_recommended === 'api_key'
-        ? 'api_key'
-        : 'host'
-      setupStore.state.claude.authMode = recommended
+      const caps = providersCaps.value.find((p) => p.provider === provider.value)
+      if (caps) setupStore.state.claude.authMode = recommendedMode(caps)
       setupStore.state.claude.initialized = true
     }
   } catch {
@@ -481,8 +601,9 @@ async function testConnection(): Promise<void> {
 
   try {
     const { data } = await api.post(
-      '/setup/check-claude',
+      '/setup/check-ai',
       {
+        provider: provider.value,
         authMode: authMode.value,
         apiKey: authMode.value === 'api_key' ? apiKey.value : null,
         oauthToken: authMode.value === 'subscription' ? oauthToken.value : null,
@@ -493,7 +614,7 @@ async function testConnection(): Promise<void> {
     if (!data.cli_available) {
       testStatus.value = 'failed'
       cliUnavailable.value = true
-      testError.value = data.error || 'Claude CLI not available.'
+      testError.value = data.error || `${providerTitle.value} CLI not available.`
       return
     }
     if (data.test_passed) {
@@ -525,10 +646,53 @@ async function testConnection(): Promise<void> {
   cursor: default;
 }
 
+.section-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  opacity: 0.85;
+}
+
+.section-label__num {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: rgba(var(--v-theme-primary), 0.15);
+  color: rgb(var(--v-theme-primary));
+  font-size: 0.6875rem;
+  font-weight: 700;
+}
+
 .auth-mode-tiles {
   display: flex;
   flex-direction: column;
   gap: 10px;
+}
+
+.connect-steps {
+  padding: 12px 14px;
+  border-radius: 10px;
+  background: rgba(var(--v-theme-surface-variant), 0.25);
+  border: 1px solid rgba(var(--v-border-color), var(--v-border-opacity));
+}
+
+.connect-steps__list {
+  margin: 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.connect-steps__list li {
+  line-height: 1.5;
 }
 
 .auth-tile {

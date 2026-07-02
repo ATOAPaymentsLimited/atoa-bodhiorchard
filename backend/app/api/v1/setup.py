@@ -23,7 +23,9 @@ import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.v1.ai_settings import serialize_provider
 from app.core.deps import get_current_user, get_db
+from app.models.organization import AIProvider
 from app.models.user import User
 from app.repositories.organization import OrganizationRepository
 from app.repositories.tracked_repository import TrackedRepoRepository
@@ -41,6 +43,8 @@ from app.schemas.setup import (
     SetupSourceCode,
     SetupStatusResponse,
 )
+from app.services.ai_runner.capabilities import capabilities_for
+from app.services.ai_runner.connection_check import check_connection
 from app.services.claude_env import (
     AUTH_MODE_HOST,
     AUTH_MODE_SUBSCRIPTION,
@@ -212,6 +216,21 @@ async def get_deployment_info() -> dict[str, Any]:
     return deployment_info()
 
 
+@router.get("/ai-capabilities")
+async def get_ai_capabilities() -> dict[str, Any]:
+    """Provider capability table for the setup wizard (unauthenticated).
+
+    Mirrors the authenticated ``/v1/settings/ai/capabilities`` but without an
+    org context (there's no JWT yet during first-run setup). Exposes only
+    non-sensitive metadata — models, effort levels, auth-mode shapes, install
+    hints — so the wizard can build provider-aware, deployment-gated controls.
+    """
+    return {
+        "deployment_mode": deployment_info()["mode"],
+        "providers": [serialize_provider(p) for p in AIProvider],
+    }
+
+
 # Removed: GET /setup/deploy-key, POST /setup/clone-repo.
 # Both ran post-init (after the wizard's init-org step minted a JWT), so
 # they're now served by their authenticated equivalents in
@@ -284,6 +303,60 @@ async def check_claude_with_credentials(
             detail="api_key is required when auth_mode is 'api_key'",
         )
     return await test_claude_connection(env_extra={"ANTHROPIC_API_KEY": api_key})
+
+
+@router.post("/check-ai")
+async def check_ai_with_credentials(
+    body: ClaudeCheckRequest,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Provider-aware connection test during setup (Claude / Copilot / Codex).
+
+    Validates the provider + auth_mode against the capability table, then runs
+    the provider's version check + a trivial prompt. Provisional credentials
+    are passed to the subprocess via ``env_extra`` only — never mutating the
+    backend's process env. Host mode runs against the unmodified env (host
+    ``gh``/``claude``/``codex`` login).
+    """
+    await _require_setup_incomplete(db)
+
+    try:
+        provider = AIProvider(body.provider)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unknown provider: {body.provider!r}",
+        ) from exc
+
+    caps = capabilities_for(provider)
+    spec = next((m for m in caps.auth_modes if m.value == body.auth_mode), None)
+    if spec is None:
+        valid = sorted(m.value for m in caps.auth_modes)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"auth_mode {body.auth_mode!r} is not supported by {provider.value}; "
+            f"choose one of {valid}",
+        )
+
+    # Host mode: no stored secret — rely on the host CLI login / process env.
+    if not spec.requires_secret:
+        return await check_connection(provider)
+
+    # Credentialed mode: subscription uses the OAuth token field, others the
+    # api_key field. The secret is injected only into this subprocess's env.
+    secret = (body.oauth_token if body.auth_mode == AUTH_MODE_SUBSCRIPTION else body.api_key) or ""
+    secret = secret.strip()
+    if not secret:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"A credential is required for {provider.value} '{body.auth_mode}' mode",
+        )
+    env_extra = {var: secret for var in spec.env_vars}
+    # Subscription: drop any inherited ANTHROPIC_API_KEY so it can't shadow the
+    # OAuth token and pass the test against the wrong credential.
+    if body.auth_mode == AUTH_MODE_SUBSCRIPTION:
+        env_extra["ANTHROPIC_API_KEY"] = ""
+    return await check_connection(provider, env_extra)
 
 
 @router.post("/init-org", response_model=InitOrgResponse, status_code=status.HTTP_201_CREATED)
