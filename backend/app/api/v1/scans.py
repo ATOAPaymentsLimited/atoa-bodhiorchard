@@ -36,8 +36,10 @@ from app.repositories.organization import OrganizationRepository
 from app.repositories.scan import ScanRepository
 from app.repositories.scan_run import ScanRunRepository
 from app.repositories.tracked_repository import TrackedRepoRepository
+from app.repositories.webhook_log import WebhookLogRepository
 from app.schemas.scan import (
     LegacyScanStatusResponse,
+    RescanDeliveryStatusResponse,
     ResumeScanResponse,
     ScanDetailResponse,
     StartScanRequest,
@@ -45,6 +47,7 @@ from app.schemas.scan import (
     TrackedRepoCard,
     V2ConfigResponse,
 )
+from app.services.redis_client import get_redis
 from app.services.scan.rescan_enqueue import (
     RescanHeadResolutionError,
     RescanRepoNotFoundError,
@@ -169,6 +172,19 @@ async def create_scan(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="None of the requested repo_ids are tracked by this organisation",
+        )
+    # Re-scans are driven by the PR-merge Redis-stream consumer. If Redis is
+    # unreachable, the consumer isn't running (it's started at boot only when
+    # Redis is up), so an enqueued delivery would sit forever as ``pending``
+    # and the UI would show a silent 202 with no progress. Fail loud instead.
+    if rescan_ids and await get_redis() is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=(
+                "Scan worker unavailable: Redis is not reachable, so re-scans can't be "
+                "processed. Start Redis (e.g. `docker compose -f docker-compose.infra.yml "
+                "up -d redis`), restart the backend, then retry."
+            ),
         )
     scan_id: uuid.UUID | None = None
     if first_scan_ids:
@@ -310,6 +326,41 @@ async def get_latest_scan(
         status=scan.status,
         started_at=scan.created_at.isoformat(),
         repo_runs=repo_runs,
+    )
+
+
+@router.get(
+    "/scans/rescan/{delivery_id}",
+    response_model=RescanDeliveryStatusResponse,
+    dependencies=[Depends(require_permissions(_REQUIRED_PERMISSION))],
+)
+async def get_rescan_delivery_status(
+    delivery_id: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> RescanDeliveryStatusResponse:
+    """Resolve a rescan delivery to the full scan it triggered, if any.
+
+    The operator "Scan now" button gets a null scan_id from the 202 because
+    the diff-based worker decides asynchronously whether a full scan is
+    needed. The frontend polls this by ``delivery_id`` (returned in
+    :class:`StartScanResponse`): once the cache-miss branch stamps a
+    ``scan_id`` onto the delivery, the client switches to the timeline; a
+    narrow/no-op rescan reaches a terminal status with scan_id still null.
+
+    Declared BEFORE ``/scans/{scan_id}`` so ``rescan`` is matched as a
+    literal path segment instead of being parsed as a UUID.
+    """
+    org_id = await _resolve_org_id(current_user, db)
+    row = await WebhookLogRepository(db).find_by_delivery_id(delivery_id)
+    if row is None or row.org_id != org_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+    raw_scan_id = (row.payload_summary or {}).get("triggered_scan_id")
+    scan_id = uuid.UUID(raw_scan_id) if isinstance(raw_scan_id, str) else None
+    return RescanDeliveryStatusResponse(
+        delivery_id=delivery_id,
+        status=row.status.value,
+        scan_id=scan_id,
     )
 
 
