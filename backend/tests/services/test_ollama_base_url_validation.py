@@ -1,0 +1,159 @@
+# Copyright 2025-2026 Arun Rajkumar
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""The server address decides where the backend sends a request.
+
+Whoever supplies it is choosing a destination on the backend's network, not
+their own — so an unbounded value lets an authenticated member sweep internal
+ports or read a cloud instance's credentials off the metadata endpoint, using
+the returned model list as an oracle for what answered. A scheme check alone
+does not stop that: ``http://169.254.169.254`` passes it.
+
+Ollama is local by definition, so the bound is the machine and its private
+network. Both the saved address and the merely-probed one go through here; a
+guard on only the persisted path just moves the request to the probe.
+"""
+
+import pytest
+
+from app.models.organization import AIProvider
+from app.services.ai_runner.capabilities import capabilities_for
+from app.services.ai_runner.capability_gate import provider_env
+from app.services.ai_runner.ollama_models import OLLAMA_HOST_ENV, clean_base_url
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://localhost:11434",
+        "http://127.0.0.1:11434",
+        "http://[::1]:11434",
+        "http://host.docker.internal:11434",  # Docker Desktop / host-gateway
+        "http://192.168.1.50:11434",  # Ollama on another LAN machine
+        "http://10.0.0.7:11434",
+        "https://172.16.4.2:11434",
+    ],
+)
+def test_local_and_private_addresses_are_accepted(url: str) -> None:
+    assert clean_base_url(url) == url
+
+
+def test_the_cloud_metadata_address_is_refused() -> None:
+    """The reason this check exists: 169.254.169.254 serves instance
+    credentials, and a probe against it would report success as 'no models'."""
+    with pytest.raises(ValueError, match="[Ll]ink-local"):
+        clean_base_url("http://169.254.169.254")
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://8.8.8.8:11434",
+        "https://example.com/api",
+    ],
+)
+def test_public_addresses_are_refused(url: str) -> None:
+    with pytest.raises(ValueError, match="public|local"):
+        clean_base_url(url)
+
+
+@pytest.mark.parametrize("url", ["file:///etc/passwd", "gopher://127.0.0.1", "not-a-url"])
+def test_non_http_schemes_are_refused(url: str) -> None:
+    with pytest.raises(ValueError, match="http"):
+        clean_base_url(url)
+
+
+def test_an_unknown_hostname_is_refused_rather_than_resolved() -> None:
+    """Names are not resolved: a lookup would block the loop, and what it
+    resolves to at validation time proves nothing about request time."""
+    with pytest.raises(ValueError, match="not a recognised local address"):
+        clean_base_url("http://internal-admin.corp:8080")
+
+
+def test_empty_means_use_the_default() -> None:
+    assert clean_base_url(None) is None
+    assert clean_base_url("   ") is None
+
+
+def test_a_trailing_slash_is_normalised_away() -> None:
+    """Callers join paths onto this, so a trailing slash would double up."""
+    assert clean_base_url("http://localhost:11434/") == "http://localhost:11434"
+
+
+def test_embedded_credentials_are_stripped() -> None:
+    """Anything beyond scheme/host/port is dropped, so a URL cannot smuggle
+    credentials or a path that shifts what /api/tags resolves to."""
+    assert clean_base_url("http://user:pass@localhost:11434") == "http://localhost:11434"
+
+
+def test_a_path_or_query_is_dropped() -> None:
+    assert clean_base_url("http://localhost:11434/v1/proxy?x=1") == "http://localhost:11434"
+
+
+def test_ipv6_keeps_its_brackets_after_rebuild() -> None:
+    """urlparse strips the brackets an IPv6 authority needs to be re-parsed."""
+    assert clean_base_url("http://[::1]:11434") == "http://[::1]:11434"
+
+
+def test_an_invalid_port_is_refused() -> None:
+    with pytest.raises(ValueError, match="port"):
+        clean_base_url("http://localhost:notaport")
+
+
+@pytest.mark.parametrize(
+    "ambiguous",
+    [
+        "http://127.000.000.001:11434",  # zero-padded octets
+        "http://0x7f000001:11434",  # hex
+        "http://2130706433:11434",  # bare integer
+    ],
+)
+def test_ambiguous_address_spellings_are_refused(ambiguous: str) -> None:
+    """Validating one spelling and sending another is the shape of every
+    parser-mismatch bypass: the checker reads 127.0.0.1 where the HTTP client
+    reads something else. These forms are refused rather than normalised, which
+    is the stronger outcome — there is no spelling left for the two to disagree
+    about."""
+    with pytest.raises(ValueError, match="not a recognised local address"):
+        clean_base_url(ambiguous)
+
+
+def test_an_ipv6_address_is_rendered_in_canonical_form() -> None:
+    assert clean_base_url("http://[0:0:0:0:0:0:0:1]:11434") == "http://[::1]:11434"
+
+
+def test_an_uppercase_scheme_is_normalised() -> None:
+    """urlparse lowercases the scheme; the output takes one of two literals."""
+    assert clean_base_url("HTTP://localhost:11434") == "http://localhost:11434"
+
+
+def test_provider_env_refuses_a_hostile_address_from_any_caller() -> None:
+    """provider_env is the one point every address passes through — the org's
+    saved value and the setup wizard's unsaved one, the latter from an
+    unauthenticated endpoint that did not validate it. A check living only in
+    the settings handler left that path open, which is how it was open.
+
+    Falls back to the default rather than raising: this builds a run's
+    environment and cannot report a bad request, and a run against the default
+    fails visibly instead of quietly reaching somewhere it should not.
+    """
+    caps = capabilities_for(AIProvider.ollama)
+
+    hostile = provider_env(caps, base_url="http://169.254.169.254", model="qwen3", thinking=False)
+    assert hostile[OLLAMA_HOST_ENV] == caps.default_base_url
+
+    allowed = provider_env(
+        caps, base_url="http://192.168.1.9:11434", model="qwen3", thinking=False
+    )
+    assert allowed[OLLAMA_HOST_ENV] == "http://192.168.1.9:11434"

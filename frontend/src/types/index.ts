@@ -1040,6 +1040,11 @@ export interface CodeReviewStatusResponse {
   // True when the BUD is in code_review but no repos are confirmed with a
   // clone path — the tab prompts the user to pick repos to review.
   needs_repo_selection: boolean
+  // Set when the org's AI provider cannot run this phase at all: the agent
+  // reads the branch diff, which a provider with no filesystem can't reach.
+  // A user-facing sentence naming the blocker and the way out — the tab shows
+  // it and disables the controls instead of offering a run that can only fail.
+  unsupported_reason: string | null
 }
 
 // Mirror of backend `CodeReviewOverrideRequest` Pydantic constraints in
@@ -1063,6 +1068,11 @@ export interface XPProfile {
   skill_points: number
   house_level: number
   vehicle_unlocks: string[]
+  // False when nobody in the org has ever reported dev activity, so the Claude
+  // Code hook that is the only trigger for streak awards isn't deployed. The
+  // streak cannot move however much work happens, so the XP guide marks it
+  // unavailable rather than advertising XP nobody here can earn.
+  streak_source_connected: boolean
 }
 
 export interface LeaderboardEntry {

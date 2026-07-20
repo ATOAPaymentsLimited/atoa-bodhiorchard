@@ -41,6 +41,7 @@ from app.repositories.organization import OrganizationRepository
 from app.repositories.role import RoleRepository
 from app.schemas.setup import InitOrgRequest
 from app.services.ai_runner.capabilities import capabilities_for
+from app.services.ai_runner.ollama_models import clean_base_url
 from app.services.bud_stage_seeder import seed_stage_mappings_for_org
 from app.services.claude_env import (
     AUTH_MODE_API_KEY,
@@ -89,6 +90,20 @@ def _build_org_config(req: InitOrgRequest) -> dict[str, object]:
             "auto_create_members": True,
         },
     }
+
+
+def _clean_base_url(value: str | None) -> str | None:
+    """Validate the wizard's server address, or None to use the default.
+
+    Defers to the shared validator. The wizard is unauthenticated, so it is the
+    least appropriate place to hold a looser copy of this rule.
+    """
+    try:
+        return clean_base_url(value)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=f"claude.{exc}"
+        ) from exc
 
 
 def _resolve_claude_auth(req: InitOrgRequest) -> tuple[AIProvider, str, str | None]:
@@ -146,6 +161,10 @@ async def setup_init_org(req: InitOrgRequest, db: AsyncSession) -> InitOrgResult
 
     mcp_token = secrets.token_urlsafe(_MCP_TOKEN_NUM_BYTES)
 
+    # Host-scoped settings only apply to a provider that runs against the org's
+    # own machine; storing them for one that ignores them would leave state
+    # nobody can see and nothing reads.
+    caps = capabilities_for(provider)
     org = Organization(
         name=req.organization.name,
         slug=req.organization.slug,
@@ -154,6 +173,9 @@ async def setup_init_org(req: InitOrgRequest, db: AsyncSession) -> InitOrgResult
         ai_provider=provider,
         claude_auth_mode=claude_auth_mode,
         claude_api_key_encrypted=encrypted_key,
+        ai_base_url=_clean_base_url(req.claude.base_url) if caps.requires_base_url else None,
+        ai_model=((req.claude.model or "").strip() or None) if caps.dynamic_models else None,
+        ai_thinking=bool(req.claude.thinking) if caps.supports_thinking else False,
     )
     db.add(org)
     await db.flush()
