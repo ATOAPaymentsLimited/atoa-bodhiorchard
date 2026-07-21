@@ -103,6 +103,11 @@ class MCPServerConfig:
     backend_url: str
     mcp_token: str
     tool_names: list[str] = field(default_factory=list)
+    # The org this config's token is scoped to. The CLI providers never need
+    # it — the bridge presents the token and the backend resolves the org on
+    # the far side. A provider running tools in-process has no far side, so it
+    # needs the org itself. Optional because the CLI path predates it.
+    org_id: str | None = None
 
 
 @dataclass
@@ -736,10 +741,14 @@ async def run_claude_code(
         ) as tmp:
             # guard: tighten file mode to owner-read-only BEFORE
             # writing the token, so there is no window where the token is
-            # on disk under a world-readable umask. Best-effort on Windows
-            # (no ``fchmod``); the path-based ``os.chmod`` below covers it.
-            with contextlib.suppress(OSError):
-                os.fchmod(tmp.fileno(), 0o600)
+            # on disk under a world-readable umask. ``os.fchmod`` is
+            # POSIX-only — it does not exist on Windows (calling it raises
+            # ``AttributeError``, which ``suppress(OSError)`` would NOT catch),
+            # so gate on ``hasattr``. The path-based ``os.chmod`` below is the
+            # Windows fallback.
+            if hasattr(os, "fchmod"):
+                with contextlib.suppress(OSError):
+                    os.fchmod(tmp.fileno(), 0o600)
             tmp.write(json.dumps(mcp_json))
             mcp_config_file = Path(tmp.name)
         with contextlib.suppress(OSError):

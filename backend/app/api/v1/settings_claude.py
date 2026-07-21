@@ -35,6 +35,7 @@ from app.models.user import User
 from app.repositories.organization import OrganizationRepository
 from app.services.ai_runner.capabilities import capabilities_for
 from app.services.ai_runner.connection_check import check_provider_connection
+from app.services.ai_runner.ollama_models import clean_base_url
 from app.services.claude_env import (
     AUTH_MODE_API_KEY,
     AUTH_MODE_HOST,
@@ -48,27 +49,67 @@ router = APIRouter(tags=["settings-claude"])
 
 
 class ClaudeSettingsRead(BaseModel):
-    """Current AI-provider auth state for the org — key itself never returned."""
+    """Current AI-provider state for the org — the credential is never returned."""
 
     provider: str
     auth_mode: str
     has_api_key: bool
+    # Only meaningful for providers that run against the org's own host.
+    base_url: str | None = None
+    model: str | None = None
+    thinking: bool = False
 
 
 class ClaudeSettingsUpdate(BaseModel):
     """Update the org's AI provider, auth mode, and (optionally) its credential.
 
-    ``provider`` selects the agent CLI (claude / copilot / codex). ``api_key``
-    is consumed in ``api_key`` mode (an Anthropic key, GitHub token, or OpenAI
-    key depending on provider), ``oauth_token`` in Claude ``subscription`` mode.
-    Omitting the credential while staying in the same mode keeps the stored one;
-    switching modes requires the new credential. ``host`` mode clears it.
+    ``provider`` selects the agent (claude / copilot / codex / ollama).
+    ``api_key`` is consumed in ``api_key`` mode (an Anthropic key, GitHub
+    token, or OpenAI key depending on provider), ``oauth_token`` in Claude
+    ``subscription`` mode. Omitting the credential while staying in the same
+    mode keeps the stored one; switching modes requires the new credential.
+    ``host`` mode clears it.
+
+    ``base_url``/``model``/``thinking`` apply to providers that run against the
+    org's own host; they are cleared when switching to one that doesn't, so a
+    stale host can't linger on a provider that ignores it.
     """
 
-    provider: str | None = Field(None, description="One of 'claude', 'copilot', 'codex'.")
+    provider: str | None = Field(
+        None, description="One of 'claude', 'copilot', 'codex', 'ollama'."
+    )
     auth_mode: str = Field(..., description="An auth mode valid for the chosen provider.")
     api_key: str | None = None
     oauth_token: str | None = None
+    base_url: str | None = Field(None, description="Server address, for HTTP-based providers.")
+    model: str | None = Field(None, description="Model id, for host-provided model lists.")
+    thinking: bool | None = Field(None, description="Let the model reason before answering.")
+
+
+def _clean_base_url(value: str | None) -> str | None:
+    """Validate a user-supplied server address, or None to use the default.
+
+    Thin HTTP wrapper over the shared validator, which is the one place that
+    decides what the backend may be pointed at. Kept in one place because the
+    saved address and the probed address must be bounded identically — a check
+    that only guards the persisted path just moves the request to the probe.
+    """
+    try:
+        return clean_base_url(value)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+def _read_model(org: Organization) -> ClaudeSettingsRead:
+    """The org's provider state as the UI sees it. One shape, two endpoints."""
+    return ClaudeSettingsRead(
+        provider=(org.ai_provider or AIProvider.claude).value,
+        auth_mode=org.claude_auth_mode,
+        has_api_key=bool(org.claude_api_key_encrypted),
+        base_url=org.ai_base_url,
+        model=org.ai_model,
+        thinking=org.ai_thinking,
+    )
 
 
 def _resolve_provider(value: str | None, current: AIProvider) -> AIProvider:
@@ -117,11 +158,7 @@ async def get_claude_settings(
 ) -> ClaudeSettingsRead:
     """Return the org's current AI-provider auth configuration."""
     org = await OrganizationRepository(db).get_for_user(current_user)
-    return ClaudeSettingsRead(
-        provider=(org.ai_provider or AIProvider.claude).value,
-        auth_mode=org.claude_auth_mode,
-        has_api_key=bool(org.claude_api_key_encrypted),
-    )
+    return _read_model(org)
 
 
 @router.patch(
@@ -174,6 +211,33 @@ async def update_claude_settings(
     elif body.auth_mode == AUTH_MODE_HOST:
         org.claude_api_key_encrypted = None
 
+    # Host-scoped settings only mean anything to a provider that runs against
+    # the org's own machine. Clear them otherwise, so switching to Ollama later
+    # can't silently inherit a host someone typed months ago for a different
+    # provider — and so a stale model id can't outlive the provider that knew it.
+    # Clear when the provider has no use for the setting; otherwise keep what is
+    # stored unless this request actually supplied a replacement. Omission is not
+    # erasure — these share the credential field's contract above ("omitting it
+    # while staying in the same mode keeps the stored one"). Treating None as
+    # "clear" meant a PATCH that only switched auth mode blanked the host and the
+    # model, after which every run failed with "No Ollama model chosen for this
+    # organisation" and nothing pointed at the settings save that caused it.
+    target_caps = capabilities_for(target_provider)
+    if not target_caps.requires_base_url:
+        org.ai_base_url = None
+    elif body.base_url is not None:
+        org.ai_base_url = _clean_base_url(body.base_url)
+
+    if not target_caps.dynamic_models:
+        org.ai_model = None
+    elif body.model is not None:
+        org.ai_model = body.model.strip() or None
+
+    if not target_caps.supports_thinking:
+        org.ai_thinking = False
+    elif body.thinking is not None:
+        org.ai_thinking = bool(body.thinking)
+
     await db.flush()
     apply_claude_auth_to_env(org)
 
@@ -186,11 +250,7 @@ async def update_claude_settings(
         by=current_user.email,
     )
 
-    return ClaudeSettingsRead(
-        provider=org.ai_provider.value,
-        auth_mode=org.claude_auth_mode,
-        has_api_key=bool(org.claude_api_key_encrypted),
-    )
+    return _read_model(org)
 
 
 @router.post("/claude/test")

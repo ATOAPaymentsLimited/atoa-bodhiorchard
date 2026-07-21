@@ -76,8 +76,8 @@
         <v-btn
           variant="text"
           size="small"
-          :disabled="!props.editable"
-          :title="!props.editable ? 'Move the BUD to Design to add wireframes' : ''"
+          :disabled="!canGenerate"
+          :title="generateBlockedReason"
           @click="triggerDesignGeneration"
         >
           <v-icon size="15" class="mr-1">mdi-plus</v-icon>
@@ -189,6 +189,22 @@
     </AppCallout>
 
     <AppCallout
+      v-else-if="noDesignSystem"
+      variant="warning"
+      eyebrow="Design generation unavailable"
+      icon="mdi-palette-swatch-outline"
+      class="mb-4"
+    >
+      A wireframe is built from a design system's tokens and app skeleton, and
+      none has been extracted here. Design systems come from repositories that
+      have a UI, so backend-only repositories never produce one. Add a frontend
+      repository in <router-link to="/settings/code">Settings → Code</router-link>
+      and extract its design system in
+      <router-link to="/settings/design-systems">Settings → Design systems</router-link>.
+      You can still upload a wireframe.
+    </AppCallout>
+
+    <AppCallout
       v-else
       variant="info"
       eyebrow="Create a wireframe"
@@ -219,8 +235,8 @@
         variant="tonal"
         size="small"
         color="primary"
-        :disabled="!props.editable || (extractingRepos.length > 0 && designSystemStore.items.length === 0)"
-        :title="!props.editable ? 'Move the BUD to Design phase to generate wireframes' : ''"
+        :disabled="!canGenerate"
+        :title="generateBlockedReason"
         @click="triggerDesignGeneration"
       >
         <v-icon start size="15">mdi-creation-outline</v-icon>
@@ -238,7 +254,13 @@
   <div v-else class="section-empty">
     <v-icon icon="mdi-palette-outline" size="40" class="mb-3" />
     <div>No design yet</div>
-    <div class="text-caption text-medium-emphasis mt-1 mb-3">
+    <div v-if="noDesignSystem" class="text-caption text-medium-emphasis mt-1 mb-3">
+      Design generation is unavailable — it needs a design system, and
+      backend-only repositories never produce one. Add a frontend repository in
+      <router-link to="/settings/code">Settings → Code</router-link>, or upload
+      a wireframe.
+    </div>
+    <div v-else class="text-caption text-medium-emphasis mt-1 mb-3">
       The AI agent will generate wireframes automatically
     </div>
     <div class="d-flex align-center ga-2">
@@ -246,8 +268,8 @@
         variant="tonal"
         size="small"
         color="primary"
-        :disabled="!props.editable || (extractingRepos.length > 0 && designSystemStore.items.length === 0)"
-        :title="!props.editable ? 'Move the BUD to Design phase to generate wireframes' : ''"
+        :disabled="!canGenerate"
+        :title="generateBlockedReason"
         @click="triggerDesignGeneration"
       >
         <v-icon start size="15">mdi-creation-outline</v-icon>
@@ -361,6 +383,48 @@ const designAutoOff = computed(
   () => currentBUD.value?.auto_generate_phases?.design !== true,
 )
 
+// An empty list is only meaningful once we know the fetch actually ran: the
+// store swallows failures and leaves `items` empty, so a transient 500 would
+// otherwise be indistinguishable from a genuine absence — and would disable
+// generation while blaming a backend-only repository, sending the user to add
+// a frontend repo they may already have.
+const designSystemsUnknown = computed(
+  () => designSystemStore.loading || !!designSystemStore.error,
+)
+
+// No design system anywhere in the org — nothing for the designer to build
+// from. Design systems are extracted from repos that have a UI, so an org
+// tracking only backend repos legitimately has none, permanently.
+const noDesignSystem = computed(
+  () => !designSystemsUnknown.value && designSystemStore.items.length === 0,
+)
+
+// Why AI generation is unavailable, or '' when it is available. The designer
+// builds strictly from the design system's tokens and app skeleton and is told
+// to stop rather than invent one, so without a design system the run can only
+// burn a model call and leave a failed row behind. Blocking beats offering a
+// button whose only outcome is a failure the user can't act on.
+// Single source for the button's disabled state, its tooltip, and the callout —
+// they drifted apart while each site repeated the condition inline.
+const generateBlockedReason = computed(() => {
+  if (!props.editable) return 'Move the BUD to Design phase to generate wireframes'
+  if (designSystemsUnknown.value) {
+    // Distinct from "none exists": we don't know yet, so don't diagnose.
+    return designSystemStore.error
+      ? "Couldn't check design systems — reload to try again"
+      : 'Checking design systems…'
+  }
+  if (extractingRepos.value.length > 0 && noDesignSystem.value) {
+    return 'Design system extraction is still running'
+  }
+  if (noDesignSystem.value) {
+    return 'Unavailable for backend-only repositories — add a frontend repository first'
+  }
+  return ''
+})
+
+const canGenerate = computed(() => generateBlockedReason.value === '')
+
 // Multi-design state
 const designs = ref<BUDDesign[]>([])
 const activeDesignTab = ref<string>('')
@@ -458,6 +522,10 @@ function debouncedSaveNotes(designId: string, value: string): void {
 onMounted(() => {
   loadDesigns()
   settingsStore.fetchRepos()
+  // Needed before first paint: the generate controls key off whether any
+  // design system exists, so without this an org that has one still renders
+  // the disabled state until some other view happens to populate the store.
+  designSystemStore.fetchAll()
 })
 
 // Self-trigger the repo-picker flow when the backend signals a fresh
@@ -515,7 +583,15 @@ async function triggerDesignGeneration(): Promise<void> {
   availableRepos.value = frontendRepos
   availableReposLoading.value = false
 
+  // No design system anywhere: the run cannot succeed, and the panel already
+  // states why and what to do. Stop here rather than trade that standing
+  // explanation for a red banner — this path is also reached unattended, via
+  // the design-phase watcher below, where nobody chose to generate at all.
+  if (noDesignSystem.value) return
+
   if (frontendRepos.length === 0) {
+    // No repo-specific design system, but one exists — the org default. The
+    // backend resolves it from a null repo id.
     await startDesignJobs([])
   } else if (frontendRepos.length === 1) {
     await startDesignJobs([frontendRepos[0].id])

@@ -25,14 +25,17 @@ from typing import Any, Protocol
 
 import structlog
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.prompts.learning_prompt import build_learning_prompt
 from app.models.bud import BUDDocument
 from app.models.bud_agent_task import AgentTaskStatus, BUDAgentTask
 from app.models.tracked_repository import TrackedRepository
+from app.repositories.organization import OrganizationRepository
 from app.schemas.bud_constants import BUD_AGENT_SECTIONS
 from app.schemas.jobs import BUDAgentTaskPayload, JobState
 from app.services.agent_activity_logger import log_agent_activity
+from app.services.agent_phase_support import PHASES_NAVIGABLE_BY_GRAPH
 from app.services.agent_prompts import (
     build_code_review_prompt,
     build_prd_prompt,
@@ -47,6 +50,7 @@ from app.services.agent_result_handlers import (
     handle_testing_result,
 )
 from app.services.ai_runner import run_agent_for_org_id
+from app.services.ai_runner.capabilities import capabilities_for
 from app.services.bud_agent_retry import maybe_retry_on_git_auth_failure
 from app.services.bud_repo_paths import confirmed_repo_paths
 from app.services.claude_runner import NO_REPO_CONTEXT, ClaudeRunnerConfig
@@ -117,6 +121,15 @@ PROMPT_BUILDERS: dict[str, PromptBuilder] = {
     "testing": build_testing_prompt,
     "closed": build_learning_prompt,
 }
+
+
+async def _provider_reads_files(db: AsyncSession, org_id: uuid_mod.UUID) -> bool:
+    """Whether this org's provider has filesystem access."""
+    org = await OrganizationRepository(db).get_by_id(org_id)
+    if org is None:
+        return True  # unknown org: keep today's behaviour, run_agent still guards
+    return capabilities_for(org.ai_provider).supports_files
+
 
 RESULT_HANDLERS: dict[str, ResultHandler] = {
     "bud": handle_prd_result,
@@ -363,6 +376,12 @@ async def handle_bud_agent_job(job_id: str, raw_payload: dict[str, Any]) -> None
             # explicit no-repo sentinel so ``_validate_working_dir`` never
             # has to fall back to the worker cwd.
             spawn_cwd: str = working_dir if working_dir else NO_REPO_CONTEXT
+            if (
+                working_dir
+                and task.task_type in PHASES_NAVIGABLE_BY_GRAPH
+                and not await _provider_reads_files(db, org_id)
+            ):
+                spawn_cwd = NO_REPO_CONTEXT
             result = await run_agent_for_org_id(
                 org_id,
                 prompt=prompt,

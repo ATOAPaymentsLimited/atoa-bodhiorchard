@@ -22,21 +22,33 @@ controls from a single source of truth.
 
 from typing import Any
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import get_current_user, get_db
 from app.models.organization import AIProvider
 from app.models.user import User
 from app.repositories.organization import OrganizationRepository
+from app.services.agent_phase_support import provider_limitations
 from app.services.ai_runner.capabilities import CAPABILITIES
+from app.services.ai_runner.ollama_models import (
+    OLLAMA_DEFAULT_BASE_URL,
+    clean_base_url,
+    list_tool_models,
+)
 from app.services.deployment_info import deployment_info
 
 router = APIRouter(tags=["settings-ai"])
 
 
 def serialize_provider(provider: AIProvider) -> dict[str, Any]:
-    """JSON-able view of one provider's capabilities for the frontend."""
+    """JSON-able view of one provider's capabilities for the frontend.
+
+    Stays synchronous and static-only: this reads the table and nothing else,
+    so the setup wizard can call it before an org exists. ``models`` is empty
+    for ``dynamic_models`` providers — those are filled in separately from the
+    org's live host, which needs I/O this function deliberately avoids.
+    """
     caps = CAPABILITIES[provider]
     return {
         "provider": provider.value,
@@ -52,18 +64,65 @@ def serialize_provider(provider: AIProvider) -> dict[str, Any]:
         ],
         "install_hint": caps.install_hint,
         "docs_url": caps.docs_url,
+        # Drives which controls the UI renders, and the callout naming what a
+        # provider cannot do — so the UI never offers a setting an adapter
+        # would reject, nor a feature the provider cannot run.
+        "supports_thinking": caps.supports_thinking,
+        "supports_mcp": caps.supports_mcp,
+        "supports_files": caps.supports_files,
+        "dynamic_models": caps.dynamic_models,
+        "requires_base_url": caps.requires_base_url,
+        "default_base_url": caps.default_base_url,
+        # Named here rather than in the UI's own copy, which drifted stale.
+        "limitations": provider_limitations(provider),
     }
+
+
+async def with_dynamic_models(
+    payloads: list[dict[str, Any]], base_url: str | None
+) -> list[dict[str, Any]]:
+    """Fill in ``models`` for providers whose models live on the org's host.
+
+    Only tool-capable models are offered: one without that capability answers
+    in prose instead of calling a tool, so listing it would let a user pick a
+    model that fails at the first agent run.
+
+    Never raises. This runs while rendering the settings page, and an
+    unreachable host means "nothing to offer" — not a 500 that hides every
+    other provider's settings too.
+    """
+    for payload in payloads:
+        if not payload.get("dynamic_models"):
+            continue
+        target = base_url or payload.get("default_base_url") or OLLAMA_DEFAULT_BASE_URL
+        names = await list_tool_models(target)
+        payload["models"] = [{"id": n, "label": n} for n in names]
+    return payloads
 
 
 @router.get("/ai/capabilities")
 async def get_ai_capabilities(
+    base_url: str | None = Query(
+        None,
+        description="Probe this address instead of the org's saved one, to list "
+        "the models of a host being configured but not yet saved.",
+    ),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
     """Return all providers' capabilities + the org's current provider + mode."""
     org = await OrganizationRepository(db).get_for_user(current_user)
+    # An unsaved address wins: the Settings page has to show the models of the
+    # host being typed, or the user saves a model the new host doesn't have.
+    # Validated even though nothing is persisted — the backend still issues the
+    # request, from inside a network the caller's browser cannot reach.
+    try:
+        probe_at = clean_base_url(base_url) or org.ai_base_url
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    providers = await with_dynamic_models([serialize_provider(p) for p in AIProvider], probe_at)
     return {
         "current_provider": (org.ai_provider or AIProvider.claude).value,
         "deployment_mode": deployment_info()["mode"],
-        "providers": [serialize_provider(p) for p in AIProvider],
+        "providers": providers,
     }
