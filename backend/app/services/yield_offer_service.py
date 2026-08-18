@@ -37,6 +37,7 @@ from app.repositories.yield_offer import YieldOfferRepository
 from app.services.assignment_policy import BUD_PRIORITY_WEIGHTS, TERMINAL_BUD_STATUSES
 from app.services.bud_assignment_actions import assign_bud, unassign_bud
 from app.services.event_bus import publish
+from app.services.yield_offer_lock import close_phase_assigner
 
 logger = structlog.get_logger(__name__)
 
@@ -141,6 +142,14 @@ async def accept_offer(
     if yieldable_bud is None or incoming_bud is None:
         raise ValueError("offer references a deleted BUD")
 
+    # Settle this offer BEFORE assigning. ``assign_bud`` supersedes every
+    # offer still pending for the BUD it assigns, so an accept that flipped
+    # its own status afterwards would first mark itself ``superseded`` and
+    # emit the wrong terminal event. Same transaction either way, so a
+    # later failure still rolls the status back.
+    offer.status = YieldOfferStatus.ACCEPTED
+    await db.flush()
+
     await unassign_bud(
         db,
         org_id,
@@ -158,8 +167,17 @@ async def accept_offer(
         actor_name=acting_user_name,
         method="yield_offer_accepted",
     )
-    offer.status = YieldOfferStatus.ACCEPTED
-    await db.flush()
+
+    await close_phase_assigner(
+        db,
+        org_id=org_id,
+        offer_id=offer.id,
+        incoming_bud_id=incoming_bud.id,
+        resolution="accepted",
+        message=f"Yield offer accepted — assigned to {acting_user_name or 'the developer'}",
+        bud_number=incoming_bud.bud_number,
+        bud_title=incoming_bud.title,
+    )
 
     publish(
         f"yield_offer:{acting_user_id}",
@@ -189,6 +207,18 @@ async def reject_offer(
     offer.status = YieldOfferStatus.REJECTED
     await db.flush()
 
+    incoming = await BUDRepository(db, org_id=org_id).get_by_id(offer.incoming_bud_id)
+    await close_phase_assigner(
+        db,
+        org_id=org_id,
+        offer_id=offer.id,
+        incoming_bud_id=offer.incoming_bud_id,
+        resolution="rejected",
+        message="Yield offer declined — assignment skipped",
+        bud_number=incoming.bud_number if incoming else None,
+        bud_title=incoming.title if incoming else None,
+    )
+
     publish(
         f"yield_offer:{acting_user_id}",
         {
@@ -202,6 +232,36 @@ async def reject_offer(
     return offer
 
 
+async def _expire_overdue_and_unlock(db: AsyncSession, org_id: uuid.UUID) -> None:
+    """Run the TTL sweep and close the phase assigner for each expiry.
+
+    Shared by both ``*_with_expiry`` readers so the unlock can never be
+    wired into one entry point and forgotten on the other — the failure
+    mode this whole change exists to remove.
+    """
+    repo = YieldOfferRepository(db, org_id=org_id)
+    expired = await repo.expire_overdue(older_than=datetime.now(UTC) - YIELD_OFFER_TTL)
+    if not expired:
+        return
+    # Org-scoped lookup: this runs per-request, unlike the cross-tenant
+    # startup reconciler, so tenant isolation stays enforced at the
+    # repository rather than resting on where the ids came from.
+    bud_repo = BUDRepository(db, org_id=org_id)
+    bud_info = await bud_repo.get_minimal_info_by_ids({bud_id for _, bud_id in expired})
+    for offer_id, bud_id in expired:
+        info = bud_info.get(bud_id)
+        await close_phase_assigner(
+            db,
+            org_id=org_id,
+            offer_id=offer_id,
+            incoming_bud_id=bud_id,
+            resolution="expired",
+            message="Yield offer expired with no response — assignment skipped",
+            bud_number=int(info["number"]) if info else None,
+            bud_title=str(info["title"]) if info else None,
+        )
+
+
 async def list_pending_with_expiry(
     db: AsyncSession,
     org_id: uuid.UUID,
@@ -213,9 +273,8 @@ async def list_pending_with_expiry(
     "expire stale rows" + "fetch pending" into one call so handlers
     don't have to remember the order.
     """
-    repo = YieldOfferRepository(db, org_id=org_id)
-    await repo.expire_overdue(older_than=datetime.now(UTC) - YIELD_OFFER_TTL)
-    return await repo.list_pending_for_user(user_id)
+    await _expire_overdue_and_unlock(db, org_id)
+    return await YieldOfferRepository(db, org_id=org_id).list_pending_for_user(user_id)
 
 
 async def list_org_pending_with_expiry(
@@ -223,9 +282,8 @@ async def list_org_pending_with_expiry(
     org_id: uuid.UUID,
 ) -> list[YieldOffer]:
     """Admin lens: every pending offer in the org, post-expiry."""
-    repo = YieldOfferRepository(db, org_id=org_id)
-    await repo.expire_overdue(older_than=datetime.now(UTC) - YIELD_OFFER_TTL)
-    return await repo.list_pending_for_org()
+    await _expire_overdue_and_unlock(db, org_id)
+    return await YieldOfferRepository(db, org_id=org_id).list_pending_for_org()
 
 
 async def reassign_offer(

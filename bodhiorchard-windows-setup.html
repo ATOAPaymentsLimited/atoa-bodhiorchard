@@ -1,0 +1,452 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Bodhiorchard — Native Windows Setup (no Docker)</title>
+<style>
+  :root {
+    --bg: #0f1a14;
+    --panel: #16241b;
+    --panel2: #1d2f24;
+    --border: #2c4635;
+    --text: #e6efe8;
+    --muted: #9fb8a8;
+    --accent: #4ea373;
+    --gold: #d9b25a;
+    --code-bg: #0b120d;
+    --warn-bg: #3a2f14;
+    --warn-border: #d9b25a;
+    --danger-bg: #3a1c1c;
+    --danger-border: #d97b7b;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.6;
+  }
+  .wrap { max-width: 900px; margin: 0 auto; padding: 32px 20px 80px; }
+  header {
+    border-bottom: 2px solid var(--accent);
+    padding-bottom: 20px;
+    margin-bottom: 24px;
+  }
+  h1 { margin: 0 0 6px; font-size: 28px; color: var(--gold); }
+  .sub { color: var(--muted); font-size: 15px; }
+  h2 {
+    margin-top: 40px;
+    font-size: 21px;
+    color: var(--accent);
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 8px;
+  }
+  h3 { margin-top: 26px; font-size: 16px; color: var(--gold); }
+  a { color: var(--gold); }
+  code:not(pre code) {
+    background: var(--code-bg);
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-size: 13px;
+    color: #f0d9a0;
+    border: 1px solid var(--border);
+  }
+  .cmd {
+    position: relative;
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    margin: 12px 0;
+  }
+  .cmd pre {
+    margin: 0;
+    padding: 14px 52px 14px 16px;
+    overflow-x: auto;
+    font-family: "Cascadia Code", "Fira Code", Consolas, monospace;
+    font-size: 13.5px;
+    color: #d7f0e0;
+    white-space: pre;
+  }
+  .cmd .lang {
+    position: absolute;
+    top: 0; left: 16px;
+    transform: translateY(-50%);
+    background: var(--panel2);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    font-size: 11px;
+    padding: 1px 8px;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  .copy {
+    position: absolute;
+    top: 8px; right: 8px;
+    background: var(--panel2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 6px;
+    padding: 4px 10px;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .copy:hover { background: var(--accent); color: #06110a; }
+  .copy.done { background: var(--accent); color: #06110a; }
+  table { border-collapse: collapse; width: 100%; margin: 16px 0; font-size: 14px; }
+  th, td { border: 1px solid var(--border); padding: 8px 12px; text-align: left; vertical-align: top; }
+  th { background: var(--panel2); color: var(--gold); }
+  tr:nth-child(even) td { background: var(--panel); }
+  .note, .warn, .danger {
+    border-radius: 8px;
+    padding: 12px 16px;
+    margin: 16px 0;
+    font-size: 14px;
+  }
+  .note { background: var(--panel); border-left: 4px solid var(--accent); }
+  .warn { background: var(--warn-bg); border-left: 4px solid var(--warn-border); }
+  .danger { background: var(--danger-bg); border-left: 4px solid var(--danger-border); }
+  .badge {
+    display: inline-block;
+    background: var(--accent);
+    color: #06110a;
+    border-radius: 50%;
+    width: 26px; height: 26px;
+    line-height: 26px;
+    text-align: center;
+    font-weight: 700;
+    margin-right: 8px;
+  }
+  ul, ol { padding-left: 22px; }
+  li { margin: 6px 0; }
+  .toc {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px 20px;
+  }
+  .toc a { text-decoration: none; }
+  .toc a:hover { text-decoration: underline; }
+  .pill {
+    display: inline-block;
+    background: var(--panel2);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 2px 10px;
+    font-size: 12px;
+    color: var(--muted);
+    margin-right: 6px;
+  }
+  footer { margin-top: 60px; color: var(--muted); font-size: 12px; border-top: 1px solid var(--border); padding-top: 16px; }
+  .dl { font-weight: 600; }
+</style>
+</head>
+<body>
+<div class="wrap">
+<header>
+  <h1>Bodhiorchard — Native Windows Setup</h1>
+  <div class="sub">Run the full stack on a Windows laptop <strong>without Docker</strong>.
+  Config chosen: native PostgreSQL 16 + pgvector · Redis skipped · Ollama (local LLM) · manual PowerShell commands.</div>
+</header>
+
+<div class="note">
+  <strong>How to use this file:</strong> follow the sections top to bottom. Each command block has a
+  <em>Copy</em> button. Run all PowerShell commands from the repository root
+  (<code>C:\path\to\atoa-bodhiorchard</code>) unless a step says otherwise.
+</div>
+
+<div class="toc">
+  <strong>Contents</strong>
+  <ol>
+    <li><a href="#prereq">Install prerequisites (with download links)</a></li>
+    <li><a href="#clone">Clone the repository</a></li>
+    <li><a href="#pg">PostgreSQL 16 + pgvector</a></li>
+    <li><a href="#ollama">Ollama (local LLM)</a></li>
+    <li><a href="#env">Environment files</a></li>
+    <li><a href="#backend">Backend — venv, deps, migrations</a></li>
+    <li><a href="#node">Frontend + multiplayer dependencies</a></li>
+    <li><a href="#run">Start the service (3 terminals)</a></li>
+    <li><a href="#verify">Verify &amp; troubleshoot</a></li>
+  </ol>
+</div>
+
+<h2 id="prereq"><span class="badge">1</span>Prerequisites</h2>
+<p>Install these first. Reboot after installing Python and Node so <code>PATH</code> updates.</p>
+<table>
+  <tr><th>Tool</th><th>Version</th><th>Download</th><th>Notes</th></tr>
+  <tr>
+    <td>Git for Windows</td><td>latest</td>
+    <td><a class="dl" href="https://git-scm.com/download/win">git-scm.com/download/win</a></td>
+    <td>Used to clone the repo and by the app for scans.</td>
+  </tr>
+  <tr>
+    <td>Node.js</td><td>≥ 18 LTS</td>
+    <td><a class="dl" href="https://nodejs.org/en/download">nodejs.org/en/download</a></td>
+    <td>Frontend, multiplayer, npm workspaces. Tick "Add to PATH".</td>
+  </tr>
+  <tr>
+    <td>Python</td><td><strong>3.12.x only</strong></td>
+    <td><a class="dl" href="https://www.python.org/downloads/release/python-31210/">Python 3.12.10 (64-bit)</a></td>
+    <td><strong>Use 3.12, not 3.13/3.14</strong> — newer versions have no compatible wheels for some deps and pip resolution fails. <strong>Tick "Add python.exe to PATH".</strong></td>
+  </tr>
+  <tr>
+    <td>PostgreSQL</td><td>16</td>
+    <td><a class="dl" href="https://www.enterprisedb.com/downloads/postgres-postgresql-downloads">EDB installer</a></td>
+    <td>Remember the <code>postgres</code> password. Keep port 5432.</td>
+  </tr>
+  <tr>
+    <td>Ollama</td><td>latest</td>
+    <td><a class="dl" href="https://ollama.com/download/windows">ollama.com/download/windows</a></td>
+    <td>Local LLM backend (the AI provider for this setup).</td>
+  </tr>
+  <tr>
+    <td>Visual C++ Build Tools</td><td>latest</td>
+    <td><a class="dl" href="https://visualstudio.microsoft.com/visual-cpp-build-tools/">Build Tools for VS</a></td>
+    <td>Needed to build pgvector, and a safety net for a few Python deps. Select the "Desktop development with C++" workload.</td>
+  </tr>
+</table>
+<p>Verify the toolchain (open a fresh PowerShell window):</p>
+<div class="cmd"><span class="lang">PowerShell</span><button class="copy">Copy</button><pre>git --version
+node --version
+npm --version
+python --version</pre></div>
+<div class="note">Expected: git any recent, node v18+, python 3.12.x.</div>
+
+<h2 id="clone"><span class="badge">2</span>Clone the repository</h2>
+<div class="cmd"><span class="lang">PowerShell</span><button class="copy">Copy</button><pre>cd C:\dev
+git clone git@github.com:ATOAPaymentsLimited/atoa-bodhiorchard.git
+cd atoa-bodhiorchard</pre></div>
+<div class="note">If you don't use SSH keys, clone over HTTPS instead:
+<code>git clone https://github.com/ATOAPaymentsLimited/atoa-bodhiorchard.git</code>.
+All later commands assume your current directory is this repo root.</div>
+
+<h2 id="pg"><span class="badge">3</span>PostgreSQL 16 + pgvector</h2>
+<p>pgvector is <strong>required</strong> — the first database migration runs <code>CREATE EXTENSION vector</code> and will fail without it.</p>
+
+<h3>3a. Install PostgreSQL 16</h3>
+<p>Run the EDB installer. Accept defaults, set a <code>postgres</code> superuser password you'll remember, keep port <strong>5432</strong>. You can skip Stack Builder at the end.</p>
+
+<h3>3b. Build &amp; install pgvector</h3>
+<div class="danger">
+  <strong>Must be the x64 prompt.</strong> Open <strong>"x64 Native Tools Command Prompt for VS 2022"</strong>
+  from the Start menu — <em>not</em> the plain "Developer Command Prompt" (it defaults to 32-bit and the build
+  fails with <code>tupmacs.h ... case value '4' already used</code>). Verify by typing <code>cl</code> alone:
+  the banner must read <code>for x64</code>.
+</div>
+<div class="cmd"><span class="lang">x64 Native Tools CMD</span><button class="copy">Copy</button><pre>set "PGROOT=C:\Program Files\PostgreSQL\16"
+cd %TEMP%
+git clone --branch v0.8.0 https://github.com/pgvector/pgvector.git
+cd pgvector
+nmake /F Makefile.win
+nmake /F Makefile.win install</pre></div>
+<div class="note">If your PostgreSQL is installed elsewhere, change <code>PGROOT</code> accordingly.
+A prebuilt pgvector Windows binary for PG16 also works if you prefer not to compile — drop
+<code>vector.dll</code> into <code>...\PostgreSQL\16\lib</code> and the <code>vector*</code> files into
+<code>...\PostgreSQL\16\share\extension</code>.</div>
+<div class="warn">
+  <strong>If you already hit the 32-bit error:</strong> close the wrong prompt, open the <em>x64</em> one, then
+  clean and rebuild:
+  <br><code>cd %TEMP%\pgvector &amp;&amp; nmake /F Makefile.win clean &amp;&amp; nmake /F Makefile.win &amp;&amp; nmake /F Makefile.win install</code>
+</div>
+
+<h3>3c. Create the database, user, and extensions</h3>
+<p>Open <strong>psql</strong> as the <code>postgres</code> superuser (SQL Shell (psql) from the Start menu, or the command below), and run the SQL block.</p>
+<div class="cmd"><span class="lang">PowerShell</span><button class="copy">Copy</button><pre>& "C:\Program Files\PostgreSQL\16\bin\psql.exe" -U postgres</pre></div>
+<div class="cmd"><span class="lang">psql (SQL)</span><button class="copy">Copy</button><pre>CREATE USER bodhiorchard WITH PASSWORD 'bodhiorchard';
+CREATE DATABASE bodhiorchard OWNER bodhiorchard;
+\c bodhiorchard
+CREATE EXTENSION IF NOT EXISTS vector;
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+\q</pre></div>
+<div class="note">Enabling the extensions here (as the superuser) avoids a
+"must be superuser to CREATE EXTENSION" error when migrations run later.</div>
+
+<h2 id="ollama"><span class="badge">4</span>Ollama (local LLM)</h2>
+<p>After installing Ollama, pull the default model. Ollama serves on <code>http://localhost:11434</code>, which the backend uses automatically.</p>
+<div class="cmd"><span class="lang">PowerShell</span><button class="copy">Copy</button><pre>ollama pull llama3:8b</pre></div>
+<div class="note">The <code>llama3:70b</code> premium model is optional and very large (~40&nbsp;GB) — skip it unless you specifically configure it.</div>
+
+<h2 id="env"><span class="badge">5</span>Environment files</h2>
+<p>Create the <code>.env</code> files from the examples:</p>
+<div class="cmd"><span class="lang">PowerShell</span><button class="copy">Copy</button><pre>Copy-Item backend\.env.example backend\.env
+Copy-Item frontend\.env.example frontend\.env</pre></div>
+<p>The defaults already point at local Postgres and Ollama, so minimal editing is needed. Open <code>backend\.env</code> and confirm / set:</p>
+<ul>
+  <li><code>DATABASE_URL</code> = leave default
+    (<code>postgresql+asyncpg://bodhiorchard:bodhiorchard@localhost:5432/bodhiorchard</code>).</li>
+  <li><code>LLM_PROVIDER=ollama</code> and <code>LLM_MODEL=llama3:8b</code> (already the defaults).</li>
+  <li><code>REDIS_URL</code> = leave as-is. Redis is skipped; the backend detects it's
+    unavailable and falls back automatically. Background scan/PR-merge queueing is degraded — expected.</li>
+  <li>Set real secrets so encrypted-at-rest storage works:
+    <br><code>SECRET_KEY=</code> any long random string
+    <br><code>ENCRYPTION_KEY=</code> a Fernet key (generate it in step 6c).</li>
+</ul>
+<div class="note"><code>frontend\.env</code> default (<code>VITE_API_BASE_URL=http://localhost:8000/api</code>) needs no changes for local use.</div>
+
+<h2 id="backend"><span class="badge">6</span>Backend — venv, dependencies, migrations</h2>
+
+<h3>6a. Create the virtual environment</h3>
+<div class="danger"><strong>Build it with Python 3.12.</strong> Using <code>py -3.12</code> guarantees the right interpreter
+even if a newer Python is also installed. The venv's Python must report <code>3.12.x</code> — a 3.13/3.14 venv will
+fail dependency install.</div>
+<div class="cmd"><span class="lang">PowerShell</span><button class="copy">Copy</button><pre>py -3.12 -m venv backend\.venv
+backend\.venv\Scripts\python --version
+backend\.venv\Scripts\python -m pip install --upgrade pip</pre></div>
+<div class="note">The second line must print <code>Python 3.12.x</code>. If <code>py -3.12</code> isn't found, use the full path,
+e.g. <code>"C:\Users\Admin\AppData\Local\Programs\Python\Python312\python.exe" -m venv backend\.venv</code>.
+Already made a 3.13/3.14 venv? Delete it first: <code>rmdir /s /q backend\.venv</code>.</div>
+
+<h3>6b. Install dependencies</h3>
+<p>Use the requirements file (matches "pip install requirement"):</p>
+<div class="cmd"><span class="lang">PowerShell</span><button class="copy">Copy</button><pre>backend\.venv\Scripts\pip install -r backend\requirements.txt</pre></div>
+<div class="note">Alternative (also installs dev tools — ruff, mypy, pytest):
+<code>backend\.venv\Scripts\pip install -e ".\backend[dev]"</code>. Either works for running the app.</div>
+
+<h3>6c. Generate the encryption key</h3>
+<div class="cmd"><span class="lang">PowerShell</span><button class="copy">Copy</button><pre>backend\.venv\Scripts\python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"</pre></div>
+<p>Copy the output into <code>backend\.env</code> as <code>ENCRYPTION_KEY=...</code>.</p>
+
+<h3>6d. Run database migrations</h3>
+<div class="cmd"><span class="lang">PowerShell</span><button class="copy">Copy</button><pre>cd backend
+.\.venv\Scripts\alembic upgrade head
+cd ..</pre></div>
+<div class="note">This creates all tables and the HNSW vector indexes. If it errors on the
+<code>vector</code> extension, revisit step 3b/3c.</div>
+
+<h2 id="node"><span class="badge">7</span>Frontend + multiplayer dependencies</h2>
+<p>Install all Node dependencies (root + both workspaces) in one command:</p>
+<div class="cmd"><span class="lang">PowerShell</span><button class="copy">Copy</button><pre>npm install</pre></div>
+
+<h2 id="run"><span class="badge">8</span>Start the service</h2>
+<p>The bundled start script is bash-only, so start each of the three processes in its own PowerShell window. Make sure Ollama and PostgreSQL are running first (both install as auto-start services).</p>
+
+<h3>Terminal 1 — Backend (port 8000)</h3>
+<div class="danger">
+  <strong>On Windows, do NOT start with <code>uvicorn --reload</code>.</strong> Under <code>--reload</code> the
+  app's Windows event-loop fix runs too late, leaving a <em>SelectorEventLoop</em> that cannot spawn
+  subprocesses — so git clones, repo scans, and the AI-agent connection test crash with
+  <code>NotImplementedError</code> (the setup wizard shows "Server unreachable"). Use the launcher below,
+  which sets the Proactor policy <em>before</em> uvicorn creates its loop.
+</div>
+<p>Create <code>backend\run_win.py</code> once with this content:</p>
+<div class="cmd"><span class="lang">backend\run_win.py</span><button class="copy">Copy</button><pre>import asyncio
+import sys
+
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+
+import uvicorn
+
+if __name__ == "__main__":
+    uvicorn.run("app.main:app", host="127.0.0.1", port=8000, reload=False)</pre></div>
+<p>Then start the backend with it:</p>
+<div class="cmd"><span class="lang">PowerShell</span><button class="copy">Copy</button><pre>cd backend
+.\.venv\Scripts\python run_win.py</pre></div>
+<div class="note">Trade-off: no hot-reload — restart this window after backend code changes. Everything else (subprocess
+spawning, agent runs, scans) now works.</div>
+
+<h3>Terminal 2 — Frontend (port 3000)</h3>
+<div class="cmd"><span class="lang">PowerShell</span><button class="copy">Copy</button><pre>npm run dev:frontend</pre></div>
+
+<h3>Terminal 3 — Multiplayer (port 2567)</h3>
+<div class="cmd"><span class="lang">PowerShell</span><button class="copy">Copy</button><pre>npm run dev:multiplayer</pre></div>
+
+<div class="note" style="font-size:15px;">
+  Then open <a href="http://localhost:3000">http://localhost:3000</a> in your browser.
+</div>
+
+<h2 id="verify"><span class="badge">9</span>Verify &amp; troubleshoot</h2>
+<h3>Ports that must be free</h3>
+<p>
+  <span class="pill">5432 PostgreSQL</span>
+  <span class="pill">8000 Backend</span>
+  <span class="pill">3000 Frontend</span>
+  <span class="pill">2567 Multiplayer</span>
+  <span class="pill">11434 Ollama</span>
+</p>
+
+<h3>Quick health checks</h3>
+<div class="cmd"><span class="lang">PowerShell</span><button class="copy">Copy</button><pre># Backend API docs
+start http://localhost:8000/docs
+
+# Ollama is serving
+curl http://localhost:11434/api/tags
+
+# Postgres accepts the app credentials
+& "C:\Program Files\PostgreSQL\16\bin\psql.exe" -U bodhiorchard -d bodhiorchard -c "\dx"</pre></div>
+
+<h3>Common issues</h3>
+<table>
+  <tr><th>Symptom</th><th>Fix</th></tr>
+  <tr>
+    <td>pgvector build fails: <em>tupmacs.h ... case value '4' already used</em></td>
+    <td>You're in a 32-bit prompt. Use the <strong>x64 Native Tools Command Prompt for VS 2022</strong> (verify <code>cl</code> says <code>for x64</code>), then <code>nmake /F Makefile.win clean</code> and rebuild. See step 3b.</td>
+  </tr>
+  <tr>
+    <td>Migration fails: <em>extension "vector" is not available</em></td>
+    <td>pgvector isn't installed into this Postgres. Redo step 3b (correct <code>PGROOT</code>, x64 prompt), then 3c.</td>
+  </tr>
+  <tr>
+    <td>Log shows <code>redis_unavailable_using_fallback</code></td>
+    <td>Expected — Redis is intentionally skipped. Not an error.</td>
+  </tr>
+  <tr>
+    <td>Setup wizard "Server unreachable" on the AI Engine test; backend log shows <code>NotImplementedError</code> at <code>create_subprocess_exec</code></td>
+    <td>Backend is on a Windows SelectorEventLoop. Start it via <code>backend\run_win.py</code> (not <code>uvicorn --reload</code>). See step 8, Terminal 1.</td>
+  </tr>
+  <tr>
+    <td>AI Engine step: Ollama shows "Soon" / only Claude, Copilot, Codex selectable</td>
+    <td>Expected — the coding <em>agent</em> can't be local yet. Use a Claude/Copilot/Codex account. Local Ollama still powers embeddings/synthesis.</td>
+  </tr>
+  <tr>
+    <td>Backend can't reach the LLM / agent calls hang</td>
+    <td>Ensure Ollama is running and <code>ollama pull llama3:8b</code> completed.</td>
+  </tr>
+  <tr>
+    <td><code>pip install</code> fails: <em>Could not find a version that satisfies... / no matching distribution</em>, wheels named <code>cp313</code>/<code>cp314</code></td>
+    <td>Your venv is Python 3.13/3.14. This project needs <strong>3.12</strong>. Delete the venv (<code>rmdir /s /q backend\.venv</code>) and recreate with <code>py -3.12 -m venv backend\.venv</code>. See step 6a.</td>
+  </tr>
+  <tr>
+    <td><code>pip install</code> fails building a package</td>
+    <td>Install the Visual C++ Build Tools ("Desktop development with C++") and retry.</td>
+  </tr>
+  <tr>
+    <td>Frontend loads but API calls 404 / fail</td>
+    <td>Confirm the backend is running on 8000 and <code>VITE_API_BASE_URL</code> in <code>frontend\.env</code> is <code>http://localhost:8000/api</code>.</td>
+  </tr>
+  <tr>
+    <td>Port already in use</td>
+    <td>Find the process: <code>netstat -ano | findstr :8000</code>, then <code>taskkill /PID &lt;pid&gt; /F</code>.</td>
+  </tr>
+</table>
+
+<div class="warn">
+  <strong>Optional — add Redis later.</strong> If you want the full background scan / PR-merge job queue,
+  install <a href="https://www.memurai.com/get-memurai">Memurai</a> (a native Redis-compatible Windows service)
+  and leave <code>REDIS_URL=redis://localhost:6379</code>. No code changes needed.
+</div>
+
+<footer>
+  Generated for a native (no-Docker) Windows install of Bodhiorchard.
+  Stack: FastAPI backend (Python 3.12) · Vue 3 frontend · Colyseus multiplayer · PostgreSQL 16 + pgvector · Ollama.
+</footer>
+</div>
+
+<script>
+  document.querySelectorAll(".copy").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      var pre = btn.parentElement.querySelector("pre");
+      navigator.clipboard.writeText(pre.innerText).then(function () {
+        var old = btn.textContent;
+        btn.textContent = "Copied";
+        btn.classList.add("done");
+        setTimeout(function () { btn.textContent = old; btn.classList.remove("done"); }, 1500);
+      });
+    });
+  });
+</script>
+</body>
+</html>

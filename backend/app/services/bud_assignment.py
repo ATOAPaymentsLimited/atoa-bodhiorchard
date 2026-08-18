@@ -30,7 +30,7 @@ from app.models.user import User, UserRole
 from app.repositories.bud import BUDRepository
 from app.repositories.bud_timeline import BUDTimelineRepository
 from app.repositories.user import UserRepository
-from app.services.agent_activity_logger import log_agent_activity
+from app.services.agent_activity_logger import PHASE_ASSIGNER_SLUG, log_agent_activity
 from app.services.assignment_policy import (
     BUD_PRIORITY_WEIGHTS,
     MAX_ACTIVE_BUDS_PER_ROLE,
@@ -50,6 +50,10 @@ from app.services.team_scope import (
 )
 from app.services.todo_assignment import (
     assign_todos_per_repo_team,
+)
+from app.services.yield_offer_lock import (
+    AWAITING_DECISION_REASON,
+    supersede_offers_for_assigned_bud,
 )
 from app.services.yield_offer_service import maybe_raise_yield_offer
 
@@ -79,7 +83,7 @@ _SMART_ASSIGNMENT_PHASES = {
 }
 
 # Skill slug used for lifecycle events emitted by this service.
-_PHASE_ASSIGNER_SLUG = "phase_assigner"
+_PHASE_ASSIGNER_SLUG = PHASE_ASSIGNER_SLUG
 
 
 def _team_scope_metadata(outcome: "_ChainOutcome") -> dict[str, Any]:
@@ -235,7 +239,7 @@ async def auto_assign_for_phase(
                 bud_number=bud.bud_number,
                 bud_title=bud.title,
                 metadata_={
-                    "reason": "yield_offer_pending",
+                    "reason": AWAITING_DECISION_REASON,
                     "role": primary_role.value,
                     "phase": phase_value,
                     "offer_id": str(offer.id),
@@ -906,6 +910,8 @@ async def _record_assignment(
             detail={"previous_assignee_id": str(old_assignee_id), "reason": "reassigned"},
         )
     bud.assignee_id = chosen.id
+    # Any offer still asking somebody to yield for this BUD is now moot.
+    await supersede_offers_for_assigned_bud(db, org_id, bud.id)
     detail: dict[str, Any] = {
         "assignee_id": str(chosen.id),
         "assignee_name": chosen.name,
