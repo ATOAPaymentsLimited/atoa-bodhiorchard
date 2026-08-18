@@ -26,11 +26,18 @@ from typing import Any
 
 from app.models.organization import AIProvider, Organization
 from app.services.ai_runner.capabilities import capabilities_for
+from app.services.ai_runner.capability_gate import adapt_config, org_api_key, provider_env
 from app.services.ai_runner.registry import provider_instance
 from app.services.ai_runner.subprocess_env import build_provider_env
 from app.services.claude_runner import NO_REPO_CONTEXT, ClaudeRunnerConfig
 
 _PING_PROMPT = "Reply with exactly: BODHIORCHARD_CONNECTION_OK"
+
+# Fine for a hosted API. A provider with a timeout_multiplier gets it scaled:
+# this is by definition the *cold* request, and on a CPU-only host the model
+# load alone can outlast a hosted API's whole round trip. Timing out here would
+# report a healthy server as unreachable.
+_DEFAULT_PING_TIMEOUT_S = 90
 
 
 async def _cli_version(provider: AIProvider, env: dict[str, str]) -> str | None:
@@ -38,8 +45,13 @@ async def _cli_version(provider: AIProvider, env: dict[str, str]) -> str | None:
 
     Uses ``create_subprocess_exec`` (argument vector, no shell) so there is no
     shell-injection surface — the same safe pattern ``claude_runner`` uses.
+
+    Returns None for a provider with no ``version_cmd``; such providers are
+    HTTP-based and are checked with ``preflight`` instead.
     """
     cmd = capabilities_for(provider).version_cmd
+    if cmd is None:
+        return None
     binary = shutil.which(cmd[0])
     if binary is None:
         return None
@@ -60,20 +72,32 @@ async def _cli_version(provider: AIProvider, env: dict[str, str]) -> str | None:
 
 
 async def check_connection(
-    provider: AIProvider, env_extra: dict[str, str] | None = None
+    provider: AIProvider,
+    env_extra: dict[str, str] | None = None,
+    timeout_seconds: int = _DEFAULT_PING_TIMEOUT_S,
 ) -> dict[str, Any]:
-    """Verify ``provider``'s CLI is installed and can authenticate.
+    """Verify ``provider`` is installed/reachable and can authenticate.
 
     Org-independent core. ``env_extra`` carries provisional credentials for
     the pre-init setup wizard (where no org/process-env exists yet); for the
     authenticated settings path it's ``None`` and the caller has already put
     the org's auth into ``os.environ``. Returns ``cli_available``,
     ``cli_version``, ``test_passed``, ``output``, ``error``, ``provider``.
+
+    A provider is "available" if its CLI version command works, or — for
+    HTTP-based providers with no CLI — if its ``preflight`` probe answers.
+    Which applies is decided by the capability table, not by naming a
+    provider here.
     """
     caps = capabilities_for(provider)
     env = build_provider_env(provider, env_extra)
 
-    version = await _cli_version(provider, env)
+    probe_error: str | None = None
+    if caps.preflight is not None:
+        probe = await caps.preflight(env_extra)
+        version, probe_error = probe.version, probe.error
+    else:
+        version = await _cli_version(provider, env)
     result: dict[str, Any] = {
         "provider": provider.value,
         "cli_available": version is not None,
@@ -83,13 +107,16 @@ async def check_connection(
         "error": None,
     }
     if version is None:
-        result["error"] = caps.install_hint
+        # The probe's own reason when it has one — a server that answered and
+        # rejected the credential is a configuration problem, not a missing
+        # install, and the install hint would send the reader to the wrong page.
+        result["error"] = probe_error or caps.install_hint
         return result
 
     run = await provider_instance(provider).run(
         _PING_PROMPT,
         NO_REPO_CONTEXT,
-        ClaudeRunnerConfig(max_turns=1, timeout_seconds=90, env_extra=env_extra),
+        ClaudeRunnerConfig(max_turns=1, timeout_seconds=timeout_seconds, env_extra=env_extra),
     )
     result["test_passed"] = run.success
     result["output"] = (run.output or "")[:200]
@@ -97,6 +124,45 @@ async def check_connection(
     return result
 
 
-async def check_provider_connection(org: Organization) -> dict[str, Any]:
-    """Verify the org's provider CLI (auth already applied to process env)."""
-    return await check_connection(org.ai_provider or AIProvider.claude)
+async def check_provider_connection(
+    org: Organization,
+    *,
+    base_url: str | None = None,
+    model: str | None = None,
+    thinking: bool | None = None,
+) -> dict[str, Any]:
+    """Verify the org's provider is reachable and can authenticate.
+
+    The org's own host/model/thinking settings are resolved through the same
+    seam a real run uses, so "Test connection" checks the configuration the org
+    will actually run with. Without that, a provider pointed at a remote host
+    would silently be probed on localhost — reporting a confident green for a
+    host nobody tested, or an install hint for a config that was fine.
+
+    The keyword overrides let the Settings page test what the user is *looking
+    at* rather than only what was last saved. The model dropdown already probes
+    the typed address to populate itself; the Test button beside it read the
+    saved value instead, so a host entered but not yet saved was tested against
+    localhost and reported broken. Each override is applied only when supplied,
+    falling back to the stored value — so an unrelated caller keeps today's
+    behaviour. The credential is never overridden here: it comes from storage,
+    because a test must not be a way to have the backend send a secret to an
+    address the caller just typed.
+    """
+    provider = org.ai_provider or AIProvider.claude
+    caps = capabilities_for(provider)
+
+    overriding = base_url is not None or model is not None or thinking is not None
+    if overriding and caps.requires_base_url:
+        env = provider_env(
+            caps,
+            base_url=base_url if base_url is not None else org.ai_base_url,
+            model=model if model is not None else org.ai_model,
+            thinking=thinking if thinking is not None else bool(org.ai_thinking),
+            api_key=org_api_key(caps, org),
+        )
+        timeout = int(_DEFAULT_PING_TIMEOUT_S * caps.timeout_multiplier)
+        return await check_connection(provider, env, timeout)
+
+    probe = adapt_config(caps, org, ClaudeRunnerConfig(timeout_seconds=_DEFAULT_PING_TIMEOUT_S))
+    return await check_connection(provider, probe.env_extra, probe.timeout_seconds)

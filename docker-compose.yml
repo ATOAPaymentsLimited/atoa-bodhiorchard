@@ -30,6 +30,12 @@ services:
   backend:
     build:
       context: ./backend
+    # Lets the container reach a server running on the host — an Ollama org in
+    # Full Docker points its base URL at http://host.docker.internal:11434,
+    # since "localhost" here is the container, not your machine. A no-op on
+    # Docker Desktop, which already resolves this name; required on Linux.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       postgres:
         condition: service_healthy
@@ -51,8 +57,6 @@ services:
       LLM_PROVIDER: ${LLM_PROVIDER:-anthropic}
       LLM_MODEL: ${LLM_MODEL:-claude-haiku-4-5-20251001}
       LLM_PREMIUM_MODEL: ${LLM_PREMIUM_MODEL:-claude-sonnet-4-6}
-      # Colyseus internal URL — must use service name, not localhost
-      COLYSEUS_URL: http://multiplayer:2567
       # Shared HMAC with the multiplayer service — both sides must match or
       # internal bridge calls (verify-token, org-snapshot, race-*) get 403.
       COLYSEUS_BRIDGE_SECRET: ${COLYSEUS_BRIDGE_SECRET:-dev-colyseus-bridge-secret}

@@ -27,6 +27,7 @@ import uuid
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, status
+from redis.exceptions import RedisError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import get_current_user, get_db, require_permissions
@@ -173,23 +174,35 @@ async def create_scan(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="None of the requested repo_ids are tracked by this organisation",
         )
-    # Re-scans are driven by the PR-merge Redis-stream consumer. If Redis is
-    # unreachable, the consumer isn't running (it's started at boot only when
-    # Redis is up), so an enqueued delivery would sit forever as ``pending``
-    # and the UI would show a silent 202 with no progress. Fail loud instead.
+    # Re-scans are normally driven by the PR-merge Redis-stream consumer. When
+    # Redis is unreachable the consumer isn't running, so rather than fail the
+    # request we DEGRADE GRACEFULLY: fold those repos into a direct full scan
+    # (``start_scan`` needs no Redis). A full re-scan is heavier than the
+    # incremental narrow synthesis the queue would have run, but it keeps
+    # scanning working when Redis is down, which is what operators want.
+    #
+    # ``start_scan`` raises if a scan is already active for the org, so it is
+    # called exactly once, with every direct-scan repo (never-scanned + any
+    # Redis-degraded re-scans) folded in. Requested-rescan count is captured
+    # BEFORE folding so the response reflects what the caller asked for.
+    requested_rescan_count = len(rescan_ids)
+    direct_scan_ids: list[uuid.UUID] = list(first_scan_ids)
     if rescan_ids and await get_redis() is None:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=(
-                "Scan worker unavailable: Redis is not reachable, so re-scans can't be "
-                "processed. Start Redis (e.g. `docker compose -f docker-compose.infra.yml "
-                "up -d redis`), restart the backend, then retry."
-            ),
+        logger.warning(
+            "rescan_degraded_to_direct_scan_no_redis",
+            org_id=str(org_id),
+            repo_count=len(rescan_ids),
         )
+        direct_scan_ids.extend(rescan_ids)
+        rescan_ids = []
+
+    # Dispatch the direct scan FIRST. A re-scan enqueue error below (404/502)
+    # must not strand never-scanned repos that had nothing wrong — those are
+    # already covered by this single ``start_scan`` call.
     scan_id: uuid.UUID | None = None
-    if first_scan_ids:
+    if direct_scan_ids:
         try:
-            scan_id = await start_scan(org_id=org_id, repo_ids=first_scan_ids, config=body.config)
+            scan_id = await start_scan(org_id=org_id, repo_ids=direct_scan_ids, config=body.config)
         except ScanAlreadyActiveError as exc:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
@@ -205,25 +218,40 @@ async def create_scan(
     for repo_id in rescan_ids:
         try:
             delivery_id = await enqueue_rescan_delivery(org_id=org_id, repo_id=repo_id)
+            rescan_delivery_ids.append(delivery_id)
         except RescanRepoNotFoundError as exc:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
         except RescanHeadResolutionError as exc:
             raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
-        rescan_delivery_ids.append(delivery_id)
+        except RedisError as exc:
+            # Redis was reachable at the up-front check but errored mid-enqueue
+            # (connection dropped, read timeout). ``enqueue_rescan_delivery``
+            # inserts the durable ``webhook_logs`` row BEFORE the XADD, so a
+            # publish failure leaves a ``pending`` row that boot-time
+            # orphan-recovery replays once Redis is back — the re-scan is
+            # deferred, not lost. Log and continue so an already-dispatched
+            # direct scan and the other re-scans are unaffected.
+            logger.warning(
+                "rescan_enqueue_redis_error_deferred",
+                org_id=str(org_id),
+                repo_id=str(repo_id),
+                error=str(exc),
+            )
 
     logger.info(
         "scan_create",
         org_id=str(org_id),
         scan_id=str(scan_id) if scan_id else None,
         first_scan_count=len(first_scan_ids),
-        rescan_count=len(rescan_ids),
+        direct_scan_count=len(direct_scan_ids),
+        rescan_count=len(rescan_delivery_ids),
     )
     return StartScanResponse(
         scan_id=scan_id,
         status="queued",
         repo_count=len(body.repo_ids),
         rescan_delivery_ids=rescan_delivery_ids,
-        rescan_repo_count=len(rescan_ids),
+        rescan_repo_count=requested_rescan_count,
     )
 
 
@@ -417,13 +445,20 @@ async def _split_by_scan_history(
     enqueue loop. The caller surfaces the empty-result case as a 404
     only if BOTH buckets end up empty.
     """
-    scanned = await TrackedRepoRepository(db, org_id=org_id).get_scanned_status_by_ids(repo_ids)
+    repo = TrackedRepoRepository(db, org_id=org_id)
+    scanned = await repo.get_scanned_status_by_ids(repo_ids)
+    # A scan that failed still stamps last_scanned_at (from its indexing phase),
+    # so it looks "scanned" and its rescan would take the incremental diff path
+    # — which no-ops when the code hasn't changed, stranding the repo with the
+    # failure forever. Re-route those to a full scan so the next click actually
+    # retries synthesis.
+    failed_last_run = await repo.get_repos_whose_last_run_failed(repo_ids)
     first_scan: list[uuid.UUID] = []
     rescan: list[uuid.UUID] = []
     for repo_id in repo_ids:
         if repo_id not in scanned:
             continue
-        if scanned[repo_id]:
+        if scanned[repo_id] and repo_id not in failed_last_run:
             rescan.append(repo_id)
         else:
             first_scan.append(repo_id)

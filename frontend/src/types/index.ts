@@ -147,7 +147,12 @@ export type BUDPriority = 'P0' | 'P1' | 'P2' | 'P3'
 
 export const BUD_PRIORITIES: readonly BUDPriority[] = ['P0', 'P1', 'P2', 'P3'] as const
 
-export type YieldOfferStatus = 'pending' | 'accepted' | 'rejected' | 'expired'
+export type YieldOfferStatus =
+  | 'pending'
+  | 'accepted'
+  | 'rejected'
+  | 'expired'
+  | 'superseded'
 
 /** A pending request asking a developer to yield a lower-priority BUD
  *  so a higher-priority one can take its slot. Shape matches
@@ -238,6 +243,10 @@ export interface BUDDocument extends BUDListItem {
   // change — synthetic skills don't have BUDAgentTask rows, so this is
   // the only signal the banner has for phase chains on remount.
   active_phase_worker: { skill_slug: string; message: string } | null
+  // A phase worker parked on a human decision (today: a pending yield
+  // offer). Feeds the banner but must NOT lock the BUD — mirrors
+  // ``awaiting_human_decision`` in backend/app/schemas/bud.py.
+  awaiting_human_decision?: { skill_slug: string; message: string } | null
   // Sticky last-failed-phase banner. Most recent unresolved skill_failed
   // event for this BUD (later skill_completed for same slug clears it),
   // newer than the user's last dismissal. Cleared by POSTing to
@@ -938,6 +947,7 @@ export type NotificationType =
   | 'developer_assigned'
   | 'reassignment_done'
   | 'race_invite'
+  | 'minigame_invite'
 
 /**
  * Structured payload attached to a race-invite notification.
@@ -960,6 +970,17 @@ export interface RaceInviteMeta {
    * hide the Decline button so the host can't decline their own race
    * back at themselves.
    */
+  declinedBy?: string
+  declinedByName?: string
+}
+
+/** Structured payload for a private Backlash challenge notification. */
+export interface BacklashInviteMeta {
+  game?: 'backlash'
+  roomId?: string
+  hostUserId?: string
+  hostName?: string
+  expiresAt?: string
   declinedBy?: string
   declinedByName?: string
 }
@@ -1040,6 +1061,11 @@ export interface CodeReviewStatusResponse {
   // True when the BUD is in code_review but no repos are confirmed with a
   // clone path — the tab prompts the user to pick repos to review.
   needs_repo_selection: boolean
+  // Set when the org's AI provider cannot run this phase at all: the agent
+  // reads the branch diff, which a provider with no filesystem can't reach.
+  // A user-facing sentence naming the blocker and the way out — the tab shows
+  // it and disables the controls instead of offering a run that can only fail.
+  unsupported_reason: string | null
 }
 
 // Mirror of backend `CodeReviewOverrideRequest` Pydantic constraints in
@@ -1063,6 +1089,11 @@ export interface XPProfile {
   skill_points: number
   house_level: number
   vehicle_unlocks: string[]
+  // False when nobody in the org has ever reported dev activity, so the Claude
+  // Code hook that is the only trigger for streak awards isn't deployed. The
+  // streak cannot move however much work happens, so the XP guide marks it
+  // unavailable rather than advertising XP nobody here can earn.
+  streak_source_connected: boolean
 }
 
 export interface LeaderboardEntry {

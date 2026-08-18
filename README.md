@@ -22,7 +22,7 @@
 
 ---
 
-**Bodhiorchard** replaces sprint, scrum, and Jira ceremony with **Agent-Driven Development (ADD)** — twelve specialised AI agents handle the busywork (triage, specs, estimates, test plans, retrospectives) while humans keep the decisions that matter, and developers earn XP for the work that actually reaches production. It's a **self-hosted Jira alternative** for the full lifecycle: intake → spec → design → development → testing → deploy → retrospective. The data plane stays on your hardware; inference runs through your choice of agent CLI — [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [GitHub Copilot](https://docs.github.com/en/copilot/concepts/agents/about-copilot-cli), or [OpenAI Codex](https://developers.openai.com/codex/cli) — picked per organization in setup, with Ollama next.
+**Bodhiorchard** replaces sprint, scrum, and Jira ceremony with **Agent-Driven Development (ADD)** — twelve specialised AI agents handle the busywork (triage, specs, estimates, test plans, retrospectives) while humans keep the decisions that matter, and developers earn XP for the work that actually reaches production. It's a **self-hosted Jira alternative** for the full lifecycle: intake → spec → design → development → testing → deploy → retrospective. The data plane stays on your hardware; inference runs through your choice of agent — [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [GitHub Copilot](https://docs.github.com/en/copilot/concepts/agents/about-copilot-cli), [OpenAI Codex](https://developers.openai.com/codex/cli), or [Ollama](https://ollama.com) for fully-local inference — picked per organization in setup.
 
 > **Less process. More shipped.** The full methodology lives at [bodhiorchard.ai](https://bodhiorchard.ai/).
 
@@ -180,7 +180,7 @@ shared/      World layout consumed by frontend + multiplayer
 examples/    TaskFlow demo repos (cross-repo feature detection)
 ```
 
-The agent layer is engine-independent: a per-org provider selector runs the codebase-aware agents through **Claude Code, GitHub Copilot, or OpenAI Codex** — each org picks one in setup, and all three reach the same tools via one STDIO MCP bridge — with Ollama next. Adding an engine is a thin adapter, not a rewrite. Bodhiorchard also runs its own **MCP server** so any of those CLIs (or any MCP client) can drive the BUD lifecycle, query the code graph, and read team context.
+The agent layer is engine-independent: a per-org provider selector runs the agents through **Claude Code, GitHub Copilot, OpenAI Codex, or Ollama** — each org picks one in setup. The three CLIs reach the same tools via one STDIO MCP bridge; Ollama has no CLI, so it speaks HTTP and runs those same tools in-process. Adding an engine is a thin adapter, not a rewrite. A provider's limits are declared, not discovered: Ollama has no file access, so the features needing it are refused outright rather than answered from guesswork. Bodhiorchard also runs its own **MCP server** so any of those CLIs (or any MCP client) can drive the BUD lifecycle, query the code graph, and read team context.
 
 ## Documentation
 
@@ -205,7 +205,7 @@ Yes — for the full workflow layer (intake through retrospective). It's especia
 
 ### Does my code leave my machine?
 
-The data plane — Postgres, embeddings, BUDs, scanned repos, audit log — is always local. Only LLM prompts leave, and only when you choose cloud inference. Fully air-gapped operation arrives with the Ollama preset.
+The data plane — Postgres, embeddings, BUDs, scanned repos, audit log — is always local. Only LLM prompts leave, and only when you choose cloud inference. Pick the Ollama provider and nothing leaves at all — at the cost of the features that need repository access (see [AI Engines](docs/ai-engines.md#what-ollama-cannot-do)).
 
 ### Do I need a Claude subscription?
 
@@ -229,7 +229,13 @@ Yes — **Apache 2.0**, including embedding in proprietary products. Contributio
 
 ### Does it run on Windows?
 
-Yes, via WSL2 in either deployment mode.
+Yes — **natively** (no WSL required) in Hybrid mode, as well as via WSL2 or Full
+Docker. `npm run dev` handles the Windows specifics for you. If you run the
+backend directly with uvicorn on native Windows, **don't use `--reload`** (it
+forces an event loop that can't spawn the subprocesses scans/agents need) — run
+`python backend\dev_server.py` instead. See
+[`backend/README.md`](backend/README.md) → *Native Windows*. Redis is optional:
+if it isn't running, re-scans fall back to a direct scan.
 
 ## Roadmap
 

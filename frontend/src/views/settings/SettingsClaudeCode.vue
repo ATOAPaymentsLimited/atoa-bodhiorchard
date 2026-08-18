@@ -78,10 +78,98 @@
             <span class="text-body-2 font-weight-medium">{{ prov.title }}</span>
           </div>
           <div class="text-caption text-medium-emphasis auth-tile__desc">
-            Runs via the <code>{{ prov.cli }}</code> CLI.
+            {{ prov.description }}
           </div>
         </div>
       </button>
+    </div>
+
+    <!-- What this provider can't do. Shown before the config, not after a
+         failed run: a provider without file access answers confidently about
+         files it never read, so silence here would be discovered too late. -->
+    <AppCallout
+      v-if="limitations.length"
+      variant="warning"
+      eyebrow="Feature limits"
+      :title="`Not available with ${providerTitle(provider)}`"
+      class="mb-4"
+    >
+      <div class="mb-2">
+        This provider reaches your code through the indexed call graph rather than the
+        filesystem, so the features that need a working tree — reading a branch diff —
+        stay off:
+      </div>
+      <ul class="ps-4">
+        <li v-for="item in limitations" :key="item">{{ item }}</li>
+      </ul>
+      <div class="mt-2">
+        Everything else runs, including requirements, tech plans, repository scanning,
+        feature synthesis and design-system extraction.
+      </div>
+    </AppCallout>
+
+    <!-- Server address: not a secret, so it does not belong in the credential
+         slot below. -->
+    <div v-if="currentCaps?.requires_base_url" class="mb-4">
+      <div class="text-body-2 font-weight-medium mb-2">Server address</div>
+      <v-text-field
+        v-model="baseUrl"
+        :placeholder="currentCaps.default_base_url ?? ''"
+        variant="outlined"
+        density="compact"
+        autocomplete="off"
+        hide-details
+        class="mb-1"
+      />
+      <div class="text-caption text-medium-emphasis">
+        Leave blank for <code>{{ currentCaps.default_base_url }}</code>. A shared or hosted
+        server works too — include the path prefix if it serves Ollama under one, and pick
+        the token auth mode below if it needs a credential.
+        <template v-if="deploymentMode === 'docker'">
+          Running in Docker, so <code>localhost</code> is the container — use
+          <code>http://host.docker.internal:11434</code> to reach a server on this machine.
+        </template>
+      </div>
+    </div>
+
+    <div v-if="currentCaps?.dynamic_models" class="mb-4">
+      <div class="text-body-2 font-weight-medium mb-2">Model</div>
+      <v-select
+        v-model="model"
+        :items="modelOptions"
+        item-title="label"
+        item-value="id"
+        variant="outlined"
+        density="compact"
+        hide-details
+        :no-data-text="'No tool-capable models found'"
+        class="mb-1"
+      />
+      <div class="text-caption text-medium-emphasis">
+        <template v-if="modelOptions.length">
+          Read from your server. Only models that support tool calling are listed — agents
+          cannot run without it.
+        </template>
+        <template v-else>
+          None found. Check the server address above, then install one:
+          <code>ollama pull qwen3</code>.
+        </template>
+      </div>
+    </div>
+
+    <div v-if="currentCaps?.supports_thinking" class="mb-4">
+      <div class="text-body-2 font-weight-medium mb-2">Reasoning</div>
+      <AppPillToggle
+        v-model="thinkingChoice"
+        :options="[
+          { value: 'off', label: 'Off (faster)' },
+          { value: 'on', label: 'On (slower)' },
+        ]"
+      />
+      <div class="text-caption text-medium-emphasis mt-1">
+        Letting the model reason before answering roughly doubles response time. Off is
+        recommended — it made no measurable difference on these tasks.
+      </div>
     </div>
 
     <div class="text-body-2 font-weight-medium mb-3">Authentication mode</div>
@@ -182,23 +270,18 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 import api from '@/services/api'
+import AppCallout from '@/components/common/AppCallout.vue'
+import AppPillToggle from '@/components/common/AppPillToggle.vue'
+import {
+  type AuthModeSpec,
+  type ProviderCaps,
+  providerIcon,
+  providerLimitations,
+  providerTitle,
+} from '@/constants/aiProviders'
 
 type Status = 'idle' | 'checking' | 'passed' | 'failed'
 
-interface AuthModeSpec { value: string; label: string; requires_secret: boolean }
-interface ProviderCaps {
-  provider: string
-  cli: string
-  auth_modes: AuthModeSpec[]
-  install_hint: string
-  docs_url: string
-}
-
-const PROVIDER_META: Record<string, { title: string; icon: string }> = {
-  claude: { title: 'Claude', icon: 'mdi-robot-happy-outline' },
-  copilot: { title: 'GitHub Copilot', icon: 'mdi-github' },
-  codex: { title: 'OpenAI Codex', icon: 'mdi-alpha-c-box-outline' },
-}
 const MODE_META: Record<string, { icon: string }> = {
   host: { icon: 'mdi-laptop' },
   api_key: { icon: 'mdi-key-variant' },
@@ -213,6 +296,13 @@ const authMode = ref<string>('host')
 const credential = ref('')
 const hasStoredCredential = ref(false)
 const saving = ref(false)
+const modelsLoading = ref(false)
+// Settings for a provider that runs against this org's own machine.
+const baseUrl = ref('')
+const model = ref('')
+// AppPillToggle carries string values, so the boolean is mapped at the edge.
+const thinkingChoice = ref<'on' | 'off'>('off')
+const thinking = computed(() => thinkingChoice.value === 'on')
 
 const claudeStatus = ref<Status>('idle')
 const claudeError = ref('')
@@ -226,15 +316,30 @@ const currentCaps = computed<ProviderCaps | undefined>(() =>
 const providerOptions = computed(() =>
   providersCaps.value.map((p) => ({
     value: p.provider,
-    title: PROVIDER_META[p.provider]?.title ?? p.provider,
-    icon: PROVIDER_META[p.provider]?.icon ?? 'mdi-robot',
-    cli: p.cli,
+    title: providerTitle(p.provider),
+    icon: providerIcon(p.provider),
+    // Not every provider is a CLI — one that talks HTTP has no binary to name.
+    description: p.cli
+      ? `Runs via the ${p.cli} CLI.`
+      : 'Runs against a server on your own machine. No CLI needed.',
   })),
 )
 
-function modeDescription(mode: AuthModeSpec): string {
+/** Models the org's own host actually has, for a dynamic-model provider. */
+const modelOptions = computed(() => currentCaps.value?.models ?? [])
+
+/** What the selected provider cannot do — empty for the CLI providers. */
+const limitations = computed(() => providerLimitations(currentCaps.value))
+
+function modeDescription(mode: AuthModeSpec, caps: ProviderCaps): string {
   if (!mode.requires_secret) {
-    return 'Inherits the host login / process environment. Nothing is stored in the database.'
+    // Two different meanings share the "no secret" shape: a CLI provider
+    // inherits a login that already exists on the host, while an HTTP provider
+    // simply sends no credential. Describing the second as the first sends the
+    // reader looking for a login they never made.
+    return caps.cli === null
+      ? 'Sends no credential — for a server that does not require one.'
+      : 'Inherits the host login / process environment. Nothing is stored in the database.'
   }
   if (mode.value === 'subscription') {
     return 'Paste an OAuth token from `claude setup-token`. Uses your Claude plan, stored encrypted.'
@@ -245,22 +350,31 @@ function modeDescription(mode: AuthModeSpec): string {
 const authOptions = computed(() => {
   const caps = currentCaps.value
   if (!caps) return []
-  // Full Docker can't reach a host login session — hide the host tile there.
+  // Full Docker can't reach a host login session, so hide the host tile there —
+  // but only for a provider that HAS a host login to inherit, which is exactly
+  // the providers driven by a CLI. For an HTTP provider (cli === null) "host"
+  // means "no authentication", which works fine from inside a container.
+  // Testing "does it offer another mode?" instead would break the moment such a
+  // provider gained a second mode: the only tile that works in Docker would be
+  // the one hidden there.
   const modes = caps.auth_modes.filter(
-    (m) => !(deploymentMode.value === 'docker' && m.value === 'host'),
+    (m) => !(deploymentMode.value === 'docker' && m.value === 'host' && caps.cli !== null),
   )
   const recommended = recommendedMode(caps)
   return modes.map((m) => ({
     value: m.value,
     title: m.label,
     icon: MODE_META[m.value]?.icon ?? 'mdi-key',
-    description: modeDescription(m),
+    description: modeDescription(m, caps),
     badge: m.value === recommended ? 'Recommended' : undefined,
   }))
 })
 
 function recommendedMode(caps: ProviderCaps): string {
-  if (deploymentMode.value === 'docker') {
+  // Docker steers to a credential only because a container cannot reach a host
+  // CLI login. An HTTP provider has no such login, so its no-auth mode is as
+  // valid in a container as anywhere else.
+  if (deploymentMode.value === 'docker' && caps.cli !== null) {
     const cred = caps.auth_modes.find((m) => m.requires_secret)
     return cred?.value ?? caps.auth_modes[0]?.value ?? 'api_key'
   }
@@ -308,6 +422,37 @@ watch([provider, authMode, credential], () => {
   }
 })
 
+// The model list is a property of whichever server the address points at, so
+// it has to be re-read when that changes. Without this, pointing at a remote
+// host still lists the models of the last one — or nothing — and the user
+// saves an empty model, which fails every later run.
+let refreshTimer: ReturnType<typeof setTimeout> | undefined
+watch(baseUrl, () => {
+  if (!currentCaps.value?.dynamic_models) return
+  clearTimeout(refreshTimer)
+  // Debounced: this fires per keystroke, and each probe is a real network call.
+  refreshTimer = setTimeout(() => void refreshModels(), 600)
+})
+
+async function refreshModels(): Promise<void> {
+  modelsLoading.value = true
+  try {
+    const { data } = await api.get('/v1/settings/ai/capabilities', {
+      params: { base_url: baseUrl.value.trim() || undefined },
+    })
+    providersCaps.value = data.providers ?? providersCaps.value
+    // A model that the new host doesn't have is not a valid choice.
+    if (model.value && !modelOptions.value.some((m) => m.id === model.value)) {
+      model.value = ''
+    }
+  } catch {
+    // An unreachable host is a normal state while typing an address — the
+    // empty list and its hint already say so.
+  } finally {
+    modelsLoading.value = false
+  }
+}
+
 onMounted(async () => {
   try {
     const { data } = await api.get('/v1/settings/ai/capabilities')
@@ -327,6 +472,9 @@ onMounted(async () => {
     loadedProvider.value = provider.value
     authMode.value = data.auth_mode
     hasStoredCredential.value = data.has_api_key
+    baseUrl.value = data.base_url ?? ''
+    model.value = data.model ?? ''
+    thinkingChoice.value = data.thinking ? 'on' : 'off'
   } catch (err: unknown) {
     const axiosErr = err as { response?: { status?: number } }
     if (axiosErr?.response?.status !== 401) {
@@ -352,7 +500,18 @@ async function save(): Promise<void> {
       auth_mode: string
       api_key?: string
       oauth_token?: string
-    } = { provider: provider.value, auth_mode: authMode.value }
+      base_url?: string
+      model?: string
+      thinking?: boolean
+    } = {
+      provider: provider.value,
+      auth_mode: authMode.value,
+      // Always sent: the backend clears whichever of these the chosen
+      // provider ignores, so a value typed for one cannot linger on another.
+      base_url: baseUrl.value.trim(),
+      model: model.value,
+      thinking: thinking.value,
+    }
     const secret = credential.value.trim()
     if (requiresSecret.value && secret.length > 0) {
       if (authMode.value === 'subscription') payload.oauth_token = secret
@@ -362,6 +521,9 @@ async function save(): Promise<void> {
     provider.value = data.provider
     loadedProvider.value = data.provider
     hasStoredCredential.value = data.has_api_key
+    baseUrl.value = data.base_url ?? ''
+    model.value = data.model ?? ''
+    thinkingChoice.value = data.thinking ? 'on' : 'off'
     credential.value = ''
     await checkConnection()
   } catch (err: unknown) {
@@ -381,7 +543,18 @@ async function checkConnection(): Promise<void> {
   claudeVersion.value = ''
   showInstallHint.value = false
   try {
-    const { data } = await api.post('/v1/settings/claude/test', null, { timeout: 120_000 })
+    // Send the on-screen host settings so the test checks the same address the
+    // model dropdown just probed, not the last-saved one — otherwise a host
+    // typed but not yet saved tests against the default (localhost) and reports
+    // a working server as broken. Non-host providers ignore these fields.
+    const body = currentCaps.value?.requires_base_url
+      ? {
+          base_url: baseUrl.value.trim() || undefined,
+          model: model.value || undefined,
+          thinking: thinking.value,
+        }
+      : null
+    const { data } = await api.post('/v1/settings/claude/test', body, { timeout: 120_000 })
     applyTestResult(data)
   } catch (err) {
     claudeStatus.value = 'failed'

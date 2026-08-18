@@ -281,9 +281,9 @@ export const useBUDStore = defineStore('bud', () => {
     try {
       const formData = new FormData()
       formData.append('file', file)
-      const { data } = await api.post(`/v1/buds/${id}/import/${section}`, formData, {
-        headers: { 'Content-Type': 'multipart/form-data' },
-      })
+      // No Content-Type override needed: the request interceptor clears
+      // it for FormData so the browser can attach the boundary.
+      const { data } = await api.post(`/v1/buds/${id}/import/${section}`, formData)
       if (currentBUD.value?.id === id) currentBUD.value = data
       return true
     } catch {
@@ -298,8 +298,12 @@ export const useBUDStore = defineStore('bud', () => {
     try {
       const { data } = await api.post(`/v1/buds/${budId}/designs/generate`, { repo_ids: repoIds })
       return data
-    } catch {
-      error.value = 'Failed to start design generation'
+    } catch (err) {
+      // Surface the backend's detail verbatim — the 409 here says *why* and
+      // names the fix ("no design system ... extract one from a repository
+      // that has a UI"). A generic fallback turns an answerable message into
+      // a dead end, which is the whole failure this guard exists to avoid.
+      error.value = extractApiError(err, 'Failed to start design generation')
       return []
     }
   }
@@ -350,9 +354,10 @@ export const useBUDStore = defineStore('bud', () => {
   ): Promise<BUDDesign> {
     // Multipart POST so the raw HTML bytes go straight to the backend
     // instead of round-tripping through an LLM tool argument (which times
-    // out on large wireframes). Let axios set the multipart boundary — do
-    // NOT hand-set Content-Type. Rethrows the backend ``detail`` so the
-    // caller can show the size/type/phase rejection reason inline.
+    // out on large wireframes). The request interceptor in services/api.ts
+    // clears the instance's JSON Content-Type for FormData bodies — without
+    // that, axios rewrites this form to JSON and drops the file. Rethrows
+    // the backend ``detail`` so the caller can show the rejection reason.
     const form = new FormData()
     form.append('file', file)
     if (repoId) form.append('repo_id', repoId)
@@ -446,15 +451,20 @@ export const useBUDStore = defineStore('bud', () => {
         last_run_status: data?.last_run_status ?? 'never_run',
         last_run_message: data?.last_run_message ?? null,
         needs_repo_selection: data?.needs_repo_selection ?? false,
+        unsupported_reason: data?.unsupported_reason ?? null,
       }
     } catch {
       // Soft failure: keep the tab usable even if the status endpoint
       // is down. The component should never block on a banner load.
+      // ``unsupported_reason`` stays null so a failed status fetch doesn't
+      // masquerade as a provider limitation — the API guard still refuses
+      // the run if the provider really can't do it.
       return {
         repos: [],
         last_run_status: 'never_run',
         last_run_message: null,
         needs_repo_selection: false,
+        unsupported_reason: null,
       }
     }
   }

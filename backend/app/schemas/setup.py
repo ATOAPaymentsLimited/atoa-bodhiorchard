@@ -68,8 +68,12 @@ class SetupClaude(BaseModel):
     with a compose-level ``ANTHROPIC_API_KEY``). ``api_key`` = Full Docker
     with a user-supplied key. ``subscription`` = Full Docker with a Claude
     Pro/Max OAuth token from ``claude setup-token``. Both credentials are
-    stored encrypted on the org. ``provider`` selects the agent CLI
-    (claude / copilot / codex); auth_mode is validated against it.
+    stored encrypted on the org. ``provider`` selects the agent
+    (claude / copilot / codex / ollama); auth_mode is validated against it.
+
+    ``base_url``/``model``/``thinking`` apply to a provider that runs against
+    the org's own host rather than a CLI, and are collected here so the org is
+    usable straight out of setup instead of needing a second visit to Settings.
     """
 
     model_config = {"populate_by_name": True}
@@ -78,15 +82,21 @@ class SetupClaude(BaseModel):
     auth_mode: str = Field(default="host", alias="authMode")
     api_key: str | None = Field(default=None, alias="apiKey")
     oauth_token: str | None = Field(default=None, alias="oauthToken")
+    base_url: str | None = Field(default=None, alias="baseUrl")
+    model: str | None = Field(default=None, alias="model")
+    thinking: bool = Field(default=False, alias="thinking")
 
 
 class ClaudeCheckRequest(BaseModel):
-    """Body for ``POST /api/setup/check-claude`` — optional provisional creds.
+    """Body for ``POST /api/setup/check-claude`` — optional provisional config.
 
-    Used by the setup wizard to validate a pasted API key or subscription OAuth
-    token *before* creating the org. The provisional credential is passed to the
-    subprocess via ``env_extra`` only — the backend's process env is never
-    mutated.
+    Used by the setup wizard to validate what the user has typed *before* the
+    org exists. Everything here is provisional: it reaches the run via
+    ``env_extra`` only, and the backend's process env is never mutated.
+
+    Carries the same host/model/thinking fields as ``SetupClaude`` so the test
+    exercises the configuration the user is about to save. Testing anything
+    else would report on a setup they never asked for.
     """
 
     model_config = {"populate_by_name": True}
@@ -95,6 +105,9 @@ class ClaudeCheckRequest(BaseModel):
     auth_mode: str = Field(default="host", alias="authMode")
     api_key: str | None = Field(default=None, alias="apiKey")
     oauth_token: str | None = Field(default=None, alias="oauthToken")
+    base_url: str | None = Field(default=None, alias="baseUrl")
+    model: str | None = Field(default=None, alias="model")
+    thinking: bool = Field(default=False, alias="thinking")
 
 
 class SetupRequest(BaseModel):
