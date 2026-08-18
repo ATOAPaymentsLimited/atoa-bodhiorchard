@@ -135,7 +135,7 @@ def load_skill(skill_name: str) -> Skill:
     if not skill_path.exists():
         raise FileNotFoundError(f"Skill not found: {skill_path}")
 
-    content = skill_path.read_text()
+    content = skill_path.read_text(encoding="utf-8")
     frontmatter, body = _parse_frontmatter(content)
 
     return Skill(
