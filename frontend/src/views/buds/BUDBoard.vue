@@ -97,17 +97,22 @@
         </v-tooltip>
         <!-- Discarded BUDs are hidden by default — they're terminal and
              clutter the active pipeline. This toggle appends a Discarded
-             column so they stay reachable for review/audit. -->
+             column so they stay reachable for review, audit and restore.
+             Labelled rather than icon-only: it sits in a row of icon
+             buttons where a bare bin glyph reads as "delete", not
+             "show the discarded ones". -->
         <v-tooltip :text="showDiscarded ? 'Hide discarded BUDs' : 'Show discarded BUDs'" location="bottom">
           <template #activator="{ props: tipProps }">
             <v-btn
               v-bind="tipProps"
-              :icon="showDiscarded ? 'mdi-delete' : 'mdi-delete-outline'"
+              :prepend-icon="showDiscarded ? 'mdi-delete' : 'mdi-delete-outline'"
               variant="text"
               size="small"
               :color="showDiscarded ? 'primary' : undefined"
               @click="showDiscarded = !showDiscarded"
-            />
+            >
+              Discarded
+            </v-btn>
           </template>
         </v-tooltip>
         <!-- Customize lifecycle stages — same permission gate as the
@@ -244,8 +249,23 @@
               <div v-if="bud.status === 'closed'" class="text-caption text-success mb-2">
                 ▸ Released: {{ formatDate(bud.updated_at) }}
               </div>
-              <div v-else-if="bud.status === 'discarded'" class="text-caption text-error mb-2">
-                ▸ Discarded: {{ formatDate(bud.updated_at) }}
+              <!-- Discarded cards carry their own restore affordance so a
+                   BUD can be brought back without opening it first. The
+                   card is a router-link, hence .stop.prevent on the button. -->
+              <div v-else-if="bud.status === 'discarded'" class="d-flex align-center justify-space-between mb-2">
+                <span class="text-caption text-error">
+                  ▸ Discarded: {{ formatDate(bud.updated_at) }}
+                </span>
+                <v-btn
+                  v-if="canEditBuds"
+                  variant="text"
+                  size="x-small"
+                  color="primary"
+                  prepend-icon="mdi-restore"
+                  @click.stop.prevent="restoreDialog?.open(bud)"
+                >
+                  Restore
+                </v-btn>
               </div>
               <div v-else-if="bud.prod_p70_date" class="text-caption text-medium-emphasis mb-2">
                 ▸ Live: {{ formatDate(bud.prod_p70_date) }} (70%)
@@ -413,6 +433,11 @@
         </v-card-actions>
       </v-card>
     </v-dialog>
+
+    <!-- Confirmation + result snackbar for restoring a discarded BUD.
+         Shared with the BUD detail page so both entry points behave
+         identically. -->
+    <BUDRestoreDialog ref="restoreDialog" />
   </div>
 </template>
 
@@ -431,6 +456,7 @@ import type { BUDStatus, BUDPriority } from '@/types'
 import { usePhaseOrder } from '@/composables/usePhaseOrder'
 import { usePermissions } from '@/composables/usePermissions'
 import AppPillToggle from '@/components/common/AppPillToggle.vue'
+import BUDRestoreDialog from '@/components/buds/BUDRestoreDialog.vue'
 import YieldOfferNotice from '@/components/buds/YieldOfferNotice.vue'
 
 // Theme-token color for each priority. Used by the chip on each card
@@ -717,7 +743,7 @@ function priorityColor(priority: BUDPriority): string {
 // kanban columns and progress-bar denominator both use this so the board
 // reacts when the org toggles UAT off, without a page reload.
 const { phaseOrder } = usePhaseOrder()
-const { canViewQAAutomation, canCreateBuds } = usePermissions()
+const { canViewQAAutomation, canCreateBuds, canEditBuds } = usePermissions()
 const boardColumns = computed<BUDStatus[]>(() =>
   phaseOrder.value.filter(s => s !== 'discarded' || showDiscarded.value),
 )
@@ -731,6 +757,12 @@ function phaseProgress(status: BUDStatus): number {
   const idx = phaseOrder.value.indexOf(status)
   return idx >= 0 ? Math.min(100, ((idx + 1) / activePhaseCount.value) * 100) : 0
 }
+
+// Restore flow for discarded BUDs lives in BUDRestoreDialog — the board
+// only needs a handle to open it. The BUD detail page mounts the same
+// component, so the confirmation, the store call and the "restored to X"
+// snackbar stay in one place.
+const restoreDialog = ref<InstanceType<typeof BUDRestoreDialog> | null>(null)
 
 function deadlineColor(deadline: string): string {
   const days = (new Date(deadline).getTime() - Date.now()) / 86400000
