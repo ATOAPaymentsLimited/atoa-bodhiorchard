@@ -39,7 +39,7 @@
 
     <v-divider class="my-4" />
 
-    <v-form ref="formRef" v-model="formValid">
+    <v-form v-model="formValid">
       <v-row dense>
         <v-col cols="12" md="6">
           <v-text-field
@@ -144,7 +144,6 @@ const maxTurns = computed<number>({
   },
 })
 
-const formRef = ref()
 const formValid = ref(true)
 const savedSnackbar = ref(false)
 
