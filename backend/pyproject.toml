@@ -23,9 +23,13 @@ dependencies = [
     "sqlalchemy[asyncio]>=2.0.23,<2.1",
     "asyncpg>=0.29.0",
     "alembic>=1.13.0",
+    # Public holidays by country/region for leave policies (MIT).
+    "holidays>=0.60,<1",
     "pydantic>=2.5.0",
     "pydantic-settings>=2.1.0",
     "python-jose[cryptography]>=3.3.0",
+    # AES-GCM for employees' sensitive details and documents.
+    "cryptography>=42.0",
     "pyjwt[crypto]>=2.8.0",
     "passlib[bcrypt]>=1.7.4",
     # passlib 1.7.x reads `bcrypt.__about__.__version__`, removed in bcrypt 5.0.
@@ -52,11 +56,12 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=7.4.0",
-    "pytest-asyncio>=0.23.0",
+    # 1.x: the loop scope is set by the options below, not an event_loop fixture.
+    "pytest-asyncio>=1.0",
     "pytest-cov>=4.1.0",
     "pytest-mock>=3.12.0",
     "respx>=0.21.0",
-    "ruff==0.16.0",  # pinned — matches CI; a floating ruff reformats on release
+    "ruff==0.17.1",  # pinned — matches CI; a floating ruff reformats on release
     "mypy>=1.7.0,<2",
     "types-cachetools",
     "httpx>=0.27.0",
@@ -109,6 +114,12 @@ ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+# One event loop for the whole session, tests and fixtures alike. Session
+# fixtures (the integration Postgres, a module-level lock or pool) are
+# created on the first test's loop; a loop per test would leave them
+# attached to a closed one ("attached to a different loop").
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
 testpaths = ["tests"]
 # Heavy / Docker-dependent tests are gated behind the ``integration``
 # marker so the default ``pytest`` run stays fast and works without

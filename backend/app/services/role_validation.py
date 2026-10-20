@@ -25,9 +25,14 @@ FastAPI handlers use the assert/read forms.
 import uuid
 
 from fastapi import HTTPException, status
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.permission_deps import permissions_for_role
+from app.core.permissions import WORKSPACE_ENGINEERING
+from app.core.role_defs import RESERVED_ROLE_NAMES
 from app.models.role import Role, RoleScopeType
-from app.repositories.role import RoleRepository
+from app.repositories.permission import PermissionRepository
+from app.repositories.role import ORG_OWNER_ROLE_NAME, RoleRepository
 from app.schemas.role import RoleRead
 
 
@@ -45,8 +50,21 @@ def is_valid_base_role(role: Role | None) -> bool:
     - Active — an inactive system role is excluded by the repository
       SQL (``... AND base.is_active = TRUE``), so members of a custom
       role inheriting from it would be invisible to auto-assignment.
+    - Not ``org_owner`` — a custom role's effective role is its base
+      role's name, so inheriting from the owner would grant the owner's
+      permission bypass to anyone holding the custom role.
     """
-    return role is not None and role.scope_type == RoleScopeType.SYSTEM and role.is_active
+    return (
+        role is not None
+        and role.scope_type == RoleScopeType.SYSTEM
+        and role.is_active
+        and role.name != ORG_OWNER_ROLE_NAME
+    )
+
+
+def is_reserved_role_name(name: str) -> bool:
+    """Return True if ``name`` collides with a system role (case-insensitive)."""
+    return name.strip().lower() in RESERVED_ROLE_NAMES
 
 
 async def assert_valid_base_role(role_repo: RoleRepository, base_role_id: uuid.UUID) -> None:
@@ -59,8 +77,35 @@ async def assert_valid_base_role(role_repo: RoleRepository, base_role_id: uuid.U
     if not is_valid_base_role(base):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="base_role_id must reference an active system role.",
+            detail="base_role_id must reference an active system role other than org_owner.",
         )
+
+
+def assert_custom_role_name_allowed(name: str) -> None:
+    """HTTP wrapper: reject a custom role name that shadows a system role."""
+    if is_reserved_role_name(name):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"'{name}' is a built-in role name. Choose a different name.",
+        )
+
+
+async def with_inherited_workspace(
+    db: AsyncSession, base_role_id: uuid.UUID, permission_ids: list[uuid.UUID]
+) -> list[uuid.UUID]:
+    """Add ``workspace:engineering`` when the base role holds it.
+
+    Custom roles store their own permission list; inheriting the workspace
+    gate from the base keeps an engineering-based custom role usable by
+    default. People-based roles (sales, hr) don't hold it, so they stay
+    people-only.
+    """
+    if WORKSPACE_ENGINEERING not in await permissions_for_role(db, base_role_id):
+        return permission_ids
+    workspace = await PermissionRepository(db).get_by_resource_id(WORKSPACE_ENGINEERING)
+    if workspace is None or workspace.id in permission_ids:
+        return permission_ids
+    return [*permission_ids, workspace.id]
 
 
 async def read_or_404(role_repo: RoleRepository, role_id: uuid.UUID) -> RoleRead:

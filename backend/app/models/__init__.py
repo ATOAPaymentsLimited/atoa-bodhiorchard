@@ -51,6 +51,11 @@ from app.models.cluster_cache import ClusterCache
 from app.models.design_system import DesignSystemRef
 from app.models.dev_activity import DevActivityLog
 from app.models.developer_xp import DeveloperXP, RewardEvent, RewardType
+from app.models.employee_audit_event import EmployeeAuditEvent
+from app.models.employee_document import EmployeeDocument
+from app.models.employee_profile import EmployeeProfile
+from app.models.employee_reporting_manager import EmployeeReportingManager
+from app.models.employee_sensitive import EmployeeSensitiveDetails
 from app.models.enterprise_rule import EnterpriseRule
 from app.models.feature import Feature
 from app.models.feature_learning import FeatureLearning
@@ -59,11 +64,20 @@ from app.models.feature_qa_session import FeatureQASession, FeatureQAStatus
 from app.models.feature_to_repo import FeatureToRepo, FeatureToRepoRole
 from app.models.jira_import import ImportStatus, JiraImportSession, JiraIssueBudMap, MapStatus
 from app.models.jwt_token import JWTToken
+from app.models.leave_config_event import LeaveConfigEvent
+from app.models.leave_digest_post import LeaveDigestPost
+from app.models.leave_ledger import LeaveLedgerEntry
+from app.models.leave_policy import LeavePolicy
+from app.models.leave_request import LeaveRequest
+from app.models.leave_slack_prompt import LeaveSlackPrompt
+from app.models.leave_type import LeaveType
 from app.models.mcp_audit_log import MCPAuditLogEntry
 from app.models.minigame import MinigameScore, MinigameSession
 from app.models.notification import Notification, NotificationType
+from app.models.office_location import OfficeLocation
 from app.models.organization import Organization
 from app.models.permission import Permission, PermissionCategory
+from app.models.policy_holiday import PolicyHoliday
 from app.models.pull_request import PRReviewStatus, PRState, PullRequest
 from app.models.qa_test_evidence import QATestEvidence
 from app.models.quiz import Quiz, QuizStatus
@@ -142,6 +156,19 @@ __all__ = [
     "BUDTimelineEventType",
     "Bug",
     "BugAttachment",
+    "EmployeeAuditEvent",
+    "EmployeeDocument",
+    "EmployeeProfile",
+    "EmployeeReportingManager",
+    "EmployeeSensitiveDetails",
+    "LeaveConfigEvent",
+    "LeaveDigestPost",
+    "LeaveLedgerEntry",
+    "LeavePolicy",
+    "LeaveRequest",
+    "LeaveSlackPrompt",
+    "LeaveType",
+    "PolicyHoliday",
     "BugComment",
     "BugSeverity",
     "BugStatus",
@@ -164,6 +191,7 @@ __all__ = [
     "MapStatus",
     "Notification",
     "NotificationType",
+    "OfficeLocation",
     "Organization",
     "OrgToUser",
     "Permission",

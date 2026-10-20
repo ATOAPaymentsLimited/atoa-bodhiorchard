@@ -28,20 +28,17 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import flag_modified
 
-from app.api.v1.ai_settings import router as ai_settings_router
-from app.api.v1.settings_claude import router as claude_router
-from app.api.v1.settings_github_members import router as gh_members_router
-from app.api.v1.settings_mcp_tokens import router as mcp_tokens_router
-from app.api.v1.settings_repos import router as repos_router
-from app.api.v1.settings_slack import router as slack_router
-from app.core.deps import get_current_user, get_db, require_permissions
+from app.core.deps import get_current_user, get_db, get_permission_set, require_permissions
 from app.core.encryption import decrypt_secret, encrypt_secret
+from app.core.permission_deps import PermissionSet
+from app.core.permissions import WORKSPACE_ENGINEERING
 from app.core.security import hash_password
 from app.mcp.auth import compute_token_prefix
 from app.models.organization import Organization
 from app.models.user import User
 from app.models.user_mcp_token import DEFAULT_TOKEN_NAME, UserMCPToken
 from app.repositories.organization import OrganizationRepository
+from app.repositories.slack_identity import SlackIdentityRepository
 from app.repositories.user_mcp_token import UserMCPTokenRepository
 from app.schemas.settings import (
     AIConfigSettings,
@@ -75,6 +72,8 @@ from app.services.org_settings import (
     get_quiz_settings,
 )
 from app.services.slack_client import auth_test
+from app.services.slack_identity import assert_can_change_signing_secret
+from app.services.slack_workspace import bot_token_team
 
 # Re-exported from ``github_app_jwt`` so service-layer modules can use
 # the same template without importing this route module (which would
@@ -85,13 +84,10 @@ GITHUB_APP_INSTALL_URL_TEMPLATE = _APP_INSTALL_URL_TEMPLATE
 
 logger = structlog.get_logger(__name__)
 
+# The engineering settings sub-routers (repos, Slack, Claude, AI, GitHub
+# members, MCP tokens) are mounted from ``app/api/router.py`` behind the
+# engineering workspace gate, not here.
 router = APIRouter(tags=["settings"])
-router.include_router(repos_router)
-router.include_router(slack_router)
-router.include_router(claude_router)
-router.include_router(ai_settings_router)
-router.include_router(gh_members_router)
-router.include_router(mcp_tokens_router)
 
 
 @router.get(
@@ -146,19 +142,9 @@ async def get_connections(
             signingSecret=_mask_secret(decrypt_secret(org.slack_signing_secret or "")),
             teamId=org.slack_team_id or "",
         ),
-        aiConfig=AIConfigSettings(
-            preset=llm_cfg.get("preset", "claude-code"),
-            ollamaUrl=llm_cfg.get("ollama_url", "http://localhost:11434"),
-            ollamaModel=llm_cfg.get("ollama_model", "llama3:8b"),
-            cloudProvider=llm_cfg.get("cloud_provider", "anthropic"),
-            cloudApiKey=_mask_secret(decrypt_secret(llm_cfg.get("cloud_api_key", ""))),
-            cloudModel=llm_cfg.get("cloud_model", "claude-sonnet-4-5-20250514"),
-            mergeModelDefault=llm_cfg.get("merge_model_default"),
-            mergeModelLarge=llm_cfg.get("merge_model_large"),
-        ),
+        aiConfig=AIConfigSettings(preset=llm_cfg.get("preset", "claude-code")),
         scan=ScanSettings(
             timeoutSeconds=scan_cfg.get("timeout_seconds", 300),
-            mergeTimeoutSeconds=scan_cfg.get("merge_timeout_seconds", 300),
             maxTurns=scan_cfg.get("max_turns", 40),
             autoCreateMembers=scan_cfg.get("auto_create_members", True),
         ),
@@ -181,6 +167,7 @@ async def get_connections(
 async def update_connections(
     body: ConnectionsUpdate,
     current_user: User = Depends(get_current_user),
+    perms: PermissionSet = Depends(get_permission_set),
     db: AsyncSession = Depends(get_db),
 ) -> ConnectionsRead:
     """Update organization connection settings.
@@ -237,6 +224,12 @@ async def update_connections(
             # Auto-fetch team_id via auth.test so we can resolve orgs from webhooks
             auth_info = await auth_test(body.slack.bot_token)
             if auth_info and auth_info.get("team_id"):
+                if await SlackIdentityRepository(db).team_id_taken(auth_info["team_id"], org.id):
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail="That Slack workspace is already connected to another "
+                        "organization.",
+                    )
                 org.slack_team_id = auth_info["team_id"]
                 logger.info(
                     "slack_team_id_set",
@@ -244,6 +237,7 @@ async def update_connections(
                     org_id=str(org.id),
                 )
         if body.slack.signing_secret and not _is_masked(body.slack.signing_secret):
+            assert_can_change_signing_secret(perms)
             raw_secret = body.slack.signing_secret.strip()
             if not re.fullmatch(r"[0-9a-f]{32,}", raw_secret):
                 raise HTTPException(
@@ -255,32 +249,38 @@ async def update_connections(
                     ),
                 )
             org.slack_signing_secret = encrypt_secret(raw_secret)
-        # Allow manual team_id override (fallback if auth.test didn't work)
-        if body.slack.team_id:
-            org.slack_team_id = body.slack.team_id
+        # Manual team_id (fallback if auth.test didn't run on save): only
+        # accepted when Slack confirms the bot token belongs to that workspace.
+        # A new bot token sets the team id itself (above); a typed one only
+        # counts when it changes it.
+        typed_team = body.slack.team_id if not is_new_bot_token else None
+        if typed_team and typed_team != org.slack_team_id:
+            if await bot_token_team(org.slack_bot_token) != typed_team:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Slack didn't confirm that workspace for this bot token. "
+                    "Check the bot token and save again.",
+                )
+            # One workspace, one org: a second org can't claim it (that would
+            # make every Slack event and button ambiguous for both).
+            if await SlackIdentityRepository(db).team_id_taken(typed_team, org.id):
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="That Slack workspace is already connected to another organization.",
+                )
+            org.slack_team_id = typed_team
 
-    # AI config — preset + optional per-org merge model overrides.
+    # AI config — the agent preset. Credentials and model selection are
+    # owned by the dedicated AI settings endpoints, not this payload.
     if body.ai_config is not None:
         existing_llm = dict(config.get("llm") or {})
         existing_llm["preset"] = body.ai_config.preset
-        # None on either field means "use platform default"; persist as
-        # absent rather than null so get_merge_models's allowlist logic
-        # sees a clean fallback path.
-        if body.ai_config.merge_model_default is None:
-            existing_llm.pop("merge_model_default", None)
-        else:
-            existing_llm["merge_model_default"] = body.ai_config.merge_model_default
-        if body.ai_config.merge_model_large is None:
-            existing_llm.pop("merge_model_large", None)
-        else:
-            existing_llm["merge_model_large"] = body.ai_config.merge_model_large
         config["llm"] = existing_llm
 
     # Scan settings
     if body.scan is not None:
         config["scan"] = {
             "timeout_seconds": body.scan.timeout_seconds,
-            "merge_timeout_seconds": body.scan.merge_timeout_seconds,
             "max_turns": body.scan.max_turns,
             "auto_create_members": body.scan.auto_create_members,
         }
@@ -357,7 +357,7 @@ async def update_connections(
 @router.get(
     "/quiz",
     response_model=QuizGameSettings,
-    dependencies=[Depends(require_permissions("quiz:configure"))],
+    dependencies=[Depends(require_permissions("quiz:configure", WORKSPACE_ENGINEERING))],
 )
 async def get_quiz_game_settings(
     current_user: User = Depends(get_current_user),
@@ -375,7 +375,7 @@ async def get_quiz_game_settings(
 @router.patch(
     "/quiz",
     response_model=QuizGameSettings,
-    dependencies=[Depends(require_permissions("quiz:configure"))],
+    dependencies=[Depends(require_permissions("quiz:configure", WORKSPACE_ENGINEERING))],
 )
 async def update_quiz_game_settings(
     body: QuizGameSettings,
@@ -409,7 +409,7 @@ class MCPTokenResponse(BaseModel):
 @router.post(
     "/mcp-token",
     response_model=MCPTokenResponse,
-    dependencies=[Depends(require_permissions("org:edit_settings"))],
+    dependencies=[Depends(require_permissions("org:edit_settings", WORKSPACE_ENGINEERING))],
 )
 async def regenerate_mcp_token(
     current_user: User = Depends(get_current_user),
@@ -475,7 +475,7 @@ async def regenerate_mcp_token(
 
 @router.get(
     "/mcp-token/status",
-    dependencies=[Depends(require_permissions("org:view_settings"))],
+    dependencies=[Depends(require_permissions("org:view_settings", WORKSPACE_ENGINEERING))],
 )
 async def mcp_token_status(
     current_user: User = Depends(get_current_user),

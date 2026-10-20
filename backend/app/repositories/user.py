@@ -15,17 +15,20 @@
 """User data access repository."""
 
 import uuid
+from collections.abc import Collection
 from typing import Any
 
-from sqlalchemy import Select, and_, case, func, or_, select, true
+from sqlalchemy import Select, and_, case, false, func, null, or_, select, true
 from sqlalchemy import delete as sql_delete
 from sqlalchemy import update as sql_update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
+from app.core.role_defs import UNASSIGNED_MEMBER_PERMISSIONS
 from app.models.developer_xp import DeveloperXP
-from app.models.role import Role, RoleScopeType
+from app.models.permission import Permission
+from app.models.role import Role, RolePermission, RoleScopeType
 from app.models.skill_profile import SkillProfile
 from app.models.user import OrgToUser, User, UserEmailAlias, UserRole
 from app.repositories.base import BaseRepository, SelectT, rowcount
@@ -44,9 +47,52 @@ def _effective_role_case(base_role_alias: Any) -> Any:
     ``.outerjoin(base_role_alias, base_role_alias.id == Role.base_role_id)``.
     """
     return case(
+        # A custom role can never *become* the owner: legacy rows created
+        # before ``org_owner`` was barred as a base role resolve to NULL
+        # rather than inheriting the owner's identity.
+        (
+            and_(
+                Role.scope_type == RoleScopeType.CUSTOM,
+                base_role_alias.name == UserRole.ORG_OWNER.value,
+            ),
+            null(),
+        ),
         (Role.scope_type == RoleScopeType.CUSTOM, base_role_alias.name),
         else_=Role.name,
     )
+
+
+def _membership_holds(permission: str) -> Any:
+    """SQL predicate: the ``OrgToUser`` row's role grants ``permission``.
+
+    Correlates on ``OrgToUser.role_id`` from the enclosing query. The
+    system ``org_owner`` role holds every permission.
+    """
+    holds = (
+        select(RolePermission.role_id)
+        .join(Permission, Permission.id == RolePermission.permission_id)
+        .where(
+            RolePermission.role_id == OrgToUser.role_id,
+            Permission.resource_id == permission,
+        )
+        .exists()
+    )
+    is_owner = (
+        select(Role.id)
+        .where(
+            Role.id == OrgToUser.role_id,
+            Role.scope_type == RoleScopeType.SYSTEM,
+            Role.name == UserRole.ORG_OWNER.value,
+        )
+        .exists()
+    )
+    # Role-less memberships resolve to the unassigned-member set, the same
+    # rule ``permission_deps.permissions_for_role`` applies in Python.
+    unassigned = and_(
+        OrgToUser.role_id.is_(None),
+        true() if permission in UNASSIGNED_MEMBER_PERMISSIONS else false(),
+    )
+    return or_(holds, is_owner, unassigned)
 
 
 def _role_from_name(name: str | None) -> UserRole | None:
@@ -161,7 +207,13 @@ class UserRepository(BaseRepository[User]):
         return [(row[0], row[1]) for row in result.all() if row[1]]
 
     async def list_slack_recipients(
-        self, org_id: uuid.UUID, *, category: str, default_enabled: bool = True
+        self,
+        org_id: uuid.UUID,
+        *,
+        category: str,
+        default_enabled: bool = True,
+        permission: str | None = None,
+        user_ids: Collection[uuid.UUID] | None = None,
     ) -> list[tuple[uuid.UUID, str]]:
         """``(user_id, slack_id)`` pairs for active members who allow ``category``.
 
@@ -179,6 +231,11 @@ class UserRepository(BaseRepository[User]):
         ``category`` is the stable string key and ``default_enabled`` the
         registry default (a ``NotificationCategory`` value / ``category_default``
         result); passing them in keeps the repo free of the registry import.
+
+        ``permission``, when given, keeps only members whose role grants it
+        (the system ``org_owner`` role counts as holding everything).
+        ``user_ids``, when given, limits the result to those members (DMs to
+        specific people, e.g. a request's approvers).
         """
         default_text = "true" if default_enabled else "false"
         stmt = (
@@ -191,6 +248,10 @@ class UserRepository(BaseRepository[User]):
                 func.coalesce(User.notification_prefs[category].astext, default_text) != "false",
             )
         )
+        if permission is not None:
+            stmt = stmt.where(_membership_holds(permission))
+        if user_ids is not None:
+            stmt = stmt.where(User.id.in_(list(user_ids)))
         result = await self._db.execute(stmt)
         return [(row[0], row[1]) for row in result.all() if row[1]]
 
@@ -231,11 +292,12 @@ class UserRepository(BaseRepository[User]):
                 User.slack_id == slack_id,
             )
         )
-        result = await self._db.execute(stmt)
-        row = result.one_or_none()
-        if row is None:
+        rows = (await self._db.execute(stmt)).all()
+        # Two members on one Slack id is ambiguous: match nobody rather than
+        # guess (linking refuses duplicates; old data may still have them).
+        if len(rows) != 1:
             return None
-        return (row[0], _role_from_name(row[1]))
+        return (rows[0][0], _role_from_name(rows[0][1]))
 
     async def list_in_org_by_ids_with_role(
         self, org_id: uuid.UUID, user_ids: list[uuid.UUID]
@@ -626,7 +688,8 @@ class UserRepository(BaseRepository[User]):
             .join(OrgToUser, OrgToUser.user_id == User.id)
             .where(OrgToUser.org_id == org_id, User.slack_id == slack_id)
         )
-        return result.scalar_one_or_none()
+        users = list(result.scalars().all())
+        return users[0] if len(users) == 1 else None
 
     async def get_membership(self, user_id: uuid.UUID, org_id: uuid.UUID) -> OrgToUser | None:
         """Fetch the OrgToUser membership row for a user/org pair.
@@ -668,6 +731,25 @@ class UserRepository(BaseRepository[User]):
         )
         result = await self._db.execute(stmt)
         return {row.slack_id: row.name for row in result.all() if row.slack_id and row.name}
+
+    async def list_member_ids_with_permission(
+        self, org_id: uuid.UUID, permission: str
+    ) -> list[uuid.UUID]:
+        """Active members of ``org_id`` whose role grants ``permission``.
+
+        The system ``org_owner`` role counts as holding everything; role-less
+        memberships resolve to the unassigned-member permission set.
+        """
+        stmt = (
+            select(User.id)
+            .join(OrgToUser, OrgToUser.user_id == User.id)
+            .where(
+                OrgToUser.org_id == org_id,
+                User.is_active.is_(True),
+                _membership_holds(permission),
+            )
+        )
+        return list((await self._db.execute(stmt)).scalars().all())
 
     async def get_names_by_ids(self, user_ids: set[uuid.UUID]) -> dict[uuid.UUID, str]:
         """Batch-fetch user names by IDs.

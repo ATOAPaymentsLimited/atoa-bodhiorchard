@@ -17,8 +17,10 @@
 import os
 from pathlib import Path
 
-from pydantic import Field, model_validator
+from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from app import instance_secrets
 
 
 class DatabaseConfig(BaseSettings):
@@ -32,68 +34,116 @@ class DatabaseConfig(BaseSettings):
     )
 
 
+_DEV_SECRET_KEY = "change-me-in-production"
+_DEV_ENCRYPTION_KEY = instance_secrets.LEGACY_ENCRYPTION_KEY
+
+
 class AuthConfig(BaseSettings):
     """Authentication and JWT configuration."""
 
     model_config = SettingsConfigDict(env_prefix="", env_file=".env", extra="ignore")
 
-    secret_key: str = Field(default="change-me-in-production", alias="SECRET_KEY")
+    secret_key: str = Field(default=_DEV_SECRET_KEY, alias="SECRET_KEY")
     encryption_key: str = Field(
-        default="change-me-encryption-key",
+        default=_DEV_ENCRYPTION_KEY,
         alias="ENCRYPTION_KEY",
         description="Key used to encrypt secrets (PATs, tokens) at rest in the database.",
     )
+    encryption_key_previous: str = Field(
+        default="",
+        alias="ENCRYPTION_KEY_PREVIOUS",
+        description="Comma-separated older ENCRYPTION_KEYs, still readable during a rotation.",
+    )
+    environment: str = Field(default="dev", alias="ENV")
     access_token_expire_minutes: int = Field(default=60, alias="ACCESS_TOKEN_EXPIRE_MINUTES")
     refresh_token_expire_days: int = Field(default=7, alias="REFRESH_TOKEN_EXPIRE_DAYS")
     algorithm: str = "HS256"
 
+    @model_validator(mode="after")
+    def _use_instance_secrets(self) -> "AuthConfig":
+        """Full Docker: take the generated keys when none are set.
 
-class LLMConfig(BaseSettings):
-    """LLM provider configuration."""
+        The old shared default stays readable as a previous key, so tokens
+        still under it are re-encrypted rather than lost.
+        """
+        if not instance_secrets.enabled():
+            return self
+        if self.secret_key in ("", _DEV_SECRET_KEY):
+            self.secret_key = instance_secrets.read("secret_key") or self.secret_key
+        if self.encryption_key in ("", _DEV_ENCRYPTION_KEY):
+            self.encryption_key = instance_secrets.read("encryption_key") or self.encryption_key
+        previous = [k.strip() for k in self.encryption_key_previous.split(",") if k.strip()]
+        if self.encryption_key != _DEV_ENCRYPTION_KEY and _DEV_ENCRYPTION_KEY not in previous:
+            self.encryption_key_previous = ",".join([*previous, _DEV_ENCRYPTION_KEY])
+        return self
 
-    model_config = SettingsConfigDict(env_prefix="LLM_", env_file=".env", extra="ignore")
+    @model_validator(mode="after")
+    def _reject_dev_secrets_in_prod(self) -> "AuthConfig":
+        """Refuse to run with empty or dev-default secrets when ENV=production.
 
-    provider: str = Field(default="ollama")
-    model: str = Field(default="llama3:8b")
-    base_url: str = Field(default="http://localhost:11434")
-    premium_provider: str = Field(default="ollama")
-    premium_model: str = Field(default="llama3:70b")
-    merge_model_default: str = Field(
-        default="claude-sonnet-4-6",
-        description=(
-            "Model for cross-repo feature merge at typical scale. "
-            "Per-org override via org.config['llm']['merge_model_default']."
-        ),
-    )
-    merge_model_large: str = Field(
-        default="claude-opus-4-7",
-        description=(
-            "Escalation model for very large merge runs. "
-            "Per-org override via org.config['llm']['merge_model_large']."
-        ),
-    )
-    merge_safe_feature_budget: int = Field(
-        default=16000,
-        description=(
-            "Active feature count above which the merge phase falls back "
-            "to embedding-blocked clusters (Phase 4). At 1M-token context, "
-            "16K features in a two-section prompt fits comfortably."
-        ),
-    )
-    merge_sonnet_quality_budget: int = Field(
-        default=3000,
-        description=(
-            "Active feature count at or below which Sonnet 4.6 handles "
-            "the merge call; above this, Opus 4.7 is selected."
-        ),
-    )
-    merge_large_cluster_opus: int = Field(
-        default=200,
-        description=(
-            "Per-cluster feature count above which Opus 4.7 is selected "
-            "for that cluster (Phase 4)."
-        ),
-    )
+        An empty or well-known ``SECRET_KEY`` makes every JWT forgeable, and
+        a default ``ENCRYPTION_KEY`` means the "encrypted" integration
+        secrets are readable by anyone with the source. Compose passes
+        ``${SECRET_KEY}`` through, so a missing env entry arrives as ``""``.
+        """
+        # Read through the settings field so ``ENV`` set in ``.env`` counts.
+        if self.environment.lower() != "production":
+            return self
+        weak = [
+            name
+            for name, value, default in (
+                ("SECRET_KEY", self.secret_key, _DEV_SECRET_KEY),
+                ("ENCRYPTION_KEY", self.encryption_key, _DEV_ENCRYPTION_KEY),
+            )
+            if not value.strip() or value == default
+        ]
+        if weak:
+            raise ValueError(
+                f"{', '.join(weak)} must be set to a non-default value when "
+                "ENV=production. Refusing to start.",
+            )
+        return self
+
+
+class HRCryptoConfig(BaseSettings):
+    """The key for employees' sensitive details and documents.
+
+    Separate from ``ENCRYPTION_KEY`` so leaking the integration-secret key
+    doesn't also expose PAN, Aadhaar, bank accounts and ID documents.
+    ``HR_ENCRYPTION_KEYS`` is a comma-separated keyring of ``kid:base64key``
+    entries (32-byte keys), newest first: new data uses the first; older
+    entries stay readable until ``scripts/rotate_hr_keys.py`` re-encrypts.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="", env_file=".env", extra="ignore")
+
+    hr_encryption_keys: SecretStr = Field(default=SecretStr(""), alias="HR_ENCRYPTION_KEYS")
+    environment: str = Field(default="dev", alias="ENV")
+
+    @model_validator(mode="after")
+    def _use_instance_secret(self) -> "HRCryptoConfig":
+        """Full Docker: take the generated keyring when none is set."""
+        if instance_secrets.enabled() and not self.hr_encryption_keys.get_secret_value().strip():
+            generated = instance_secrets.read("hr_encryption_keys")
+            if generated:
+                self.hr_encryption_keys = SecretStr(generated)
+        return self
+
+    @model_validator(mode="after")
+    def _require_key_in_prod(self) -> "HRCryptoConfig":
+        """Refuse to start in production without an HR key.
+
+        Without one the HR routes answer 503 rather than store plaintext;
+        in production that should never be a surprise discovered by HR.
+        """
+        if (
+            self.environment.lower() == "production"
+            and not self.hr_encryption_keys.get_secret_value().strip()
+        ):
+            raise ValueError(
+                "HR_ENCRYPTION_KEYS must be set when ENV=production. Refusing to start."
+            )
+        return self
 
 
 class EmbeddingConfig(BaseSettings):
@@ -293,6 +343,16 @@ class ColyseusConfig(BaseSettings):
     )
 
     @model_validator(mode="after")
+    def _use_instance_secret(self) -> "ColyseusConfig":
+        """Full Docker: take the generated bridge secret when none is set."""
+        if self.bridge_secret in ("", _DEV_BRIDGE_SECRET):
+            generated = instance_secrets.read(
+                "colyseus_bridge_secret", directory_env="BRIDGE_SECRET_DIR"
+            )
+            self.bridge_secret = generated or self.bridge_secret
+        return self
+
+    @model_validator(mode="after")
     def _reject_dev_secret_in_prod(self) -> "ColyseusConfig":
         """Refuse to run with the dev default secret when ENV=production.
 
@@ -334,7 +394,7 @@ class Settings(BaseSettings):
 
     db: DatabaseConfig = DatabaseConfig()
     auth: AuthConfig = AuthConfig()
-    llm: LLMConfig = LLMConfig()
+    hr_crypto: HRCryptoConfig = HRCryptoConfig()
     embedding: EmbeddingConfig = EmbeddingConfig()
     redis: RedisConfig = RedisConfig()
     integrations: IntegrationConfig = IntegrationConfig()

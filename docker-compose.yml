@@ -44,7 +44,22 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://bodhiorchard:bodhiorchard@postgres:5432/bodhiorchard
       REDIS_URL: redis://redis:6379
-      SECRET_KEY: change-me-in-production
+      # Leave these unset to have the backend generate them on first start
+      # and keep them in the secrets_data volume (backend/docker/
+      # instance-secrets.sh). Shared, well-known values would let anyone
+      # forge a sign-in, read stored integration tokens from a database
+      # dump, or call the multiplayer bridge. Older installs' tokens are
+      # re-encrypted under the new ENCRYPTION_KEY on first start.
+      # Turns on per-install secret generation (Full Docker only). The
+      # bridge secret goes on its own volume, shared with multiplayer.
+      INSTANCE_SECRETS_DIR: /data/secrets
+      BRIDGE_SECRET_DIR: /data/bridge
+      SECRET_KEY: ${SECRET_KEY:-}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:-}
+      ENCRYPTION_KEY_PREVIOUS: ${ENCRYPTION_KEY_PREVIOUS:-}
+      # Employees' sensitive details and documents. Without it those screens
+      # say the key isn't configured; generate one with scripts/rotate_hr_keys.py.
+      HR_ENCRYPTION_KEYS: ${HR_ENCRYPTION_KEYS:-}
       ACCESS_TOKEN_EXPIRE_MINUTES: "60"
       EMBEDDING_PROVIDER: fastembed
       EMBEDDING_MODEL: BAAI/bge-small-en-v1.5
@@ -53,13 +68,10 @@ services:
       # When unset this is empty; orgs using api_key auth mode override it
       # from the encrypted value stored in the DB.
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-      # LLM provider — defaults to anthropic; override via root .env if needed
-      LLM_PROVIDER: ${LLM_PROVIDER:-anthropic}
-      LLM_MODEL: ${LLM_MODEL:-claude-haiku-4-5-20251001}
-      LLM_PREMIUM_MODEL: ${LLM_PREMIUM_MODEL:-claude-sonnet-4-6}
       # Shared HMAC with the multiplayer service — both sides must match or
       # internal bridge calls (verify-token, org-snapshot, race-*) get 403.
-      COLYSEUS_BRIDGE_SECRET: ${COLYSEUS_BRIDGE_SECRET:-dev-colyseus-bridge-secret}
+      # Unset: generated into secrets_data, which multiplayer reads too.
+      COLYSEUS_BRIDGE_SECRET: ${COLYSEUS_BRIDGE_SECRET:-}
       # Inside Docker the multiplayer server is reachable at its service
       # name. Without this, settings.colyseus.url defaults to
       # http://localhost:2567 which resolves to the backend container
@@ -85,6 +97,9 @@ services:
       # Persistent store for the backend's ed25519 deploy keypair used to
       # clone private GitHub repos. Only the public key is ever exposed.
       - ssh_data:/data/ssh
+      # This install's generated keys (backend/docker/instance-secrets.sh).
+      - secrets_data:/data/secrets
+      - bridge_secret_data:/data/bridge
       # Uploaded files (QA evidence, bug attachments) when the local-disk
       # storage backend is in use, which is the default. WORKDIR is /app
       # and FILE_STORAGE_LOCAL_DIR defaults to the relative
@@ -138,11 +153,14 @@ services:
       # localhost — BackendClient.ts defaults to http://localhost:8000 which
       # resolves to this container itself.
       BACKEND_URL: http://backend:8000
-      # Shared HMAC for internal bridge calls. Pinned to the same default on
-      # both sides so they can't drift silently; override in production via
-      # a host env var and the backend's COLYSEUS_BRIDGE_SECRET will see it
-      # too (they share the key).
-      COLYSEUS_BRIDGE_SECRET: ${COLYSEUS_BRIDGE_SECRET:-dev-colyseus-bridge-secret}
+      # Shared HMAC for internal bridge calls. Set it on the host to pin
+      # both sides; unset, this reads the one the backend generated into
+      # secrets_data (multiplayer/docker-entrypoint.sh).
+      COLYSEUS_BRIDGE_SECRET: ${COLYSEUS_BRIDGE_SECRET:-}
+      BRIDGE_SECRET_DIR: /data/bridge
+    volumes:
+      # Only the bridge secret: never the backend's secrets_data.
+      - bridge_secret_data:/data/bridge:ro
     ports:
       - "2567:2567"
 
@@ -162,4 +180,6 @@ volumes:
   postgres_data:
   repos_data:
   ssh_data:
+  secrets_data:
+  bridge_secret_data:
   uploads_data:
