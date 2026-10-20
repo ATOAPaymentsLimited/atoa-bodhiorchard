@@ -76,6 +76,8 @@ cd bodhiorchard
 npx bodhiorchard start     # start everything and open the setup wizard
 ```
 
+`init` writes this install's secrets, including the key that encrypts employee records (`HR_ENCRYPTION_KEYS`), to `bodhiorchard/.env`. Back that file up with your data: records encrypted with its key can't be read without it. Installs from before the key existed get one on their next `start` or `update`.
+
 Needs only **Docker (running)** and **Node.js 18+**. If Postgres (5432) or Redis (6379) — or an app port — is already in use, the installer detects it and asks whether to **remap to a free port** or **reuse the existing service**. When the stack is healthy it opens **http://localhost:3000/setup**; finish there (organization, admin account, AI provider, repositories). No keys are entered on the command line.
 
 Manage the stack with these commands (run from the install directory):
@@ -118,6 +120,14 @@ Once the UI is up:
 
 The key is encrypted (Fernet AES-128) in Postgres and pushed into the backend's process env on save, so every subsequent agent run inherits it. No compose-level env var required.
 
+#### Secrets in Full Docker
+
+You don't set any. On first start the backend generates this install's own `SECRET_KEY` (signs sign-ins), `ENCRYPTION_KEY` (encrypts stored tokens such as the Claude, Slack, GitHub and Jira keys), `HR_ENCRYPTION_KEYS` (encrypts employees' bank and ID details and documents) and `COLYSEUS_BRIDGE_SECRET` (shared with the multiplayer server), and keeps them in the `secrets_data` volume so they survive rebuilds. Setting any of them in your environment overrides the generated one.
+
+Installs from before per-install keys had their stored tokens encrypted under a shared default key. Every start re-encrypts anything still under that old key, so the first start after updating moves them all over (and signs everyone out once). A token that can't be read with any key is listed in the log; save it again in Settings. Scripts run with `docker compose exec backend python -m scripts...` use the same generated keys as the server.
+
+Keep the `secrets_data` volume with your database: without its `encryption_key` the stored tokens can't be read, and without its `hr_encryption_keys` the employee records can't. `docker compose down -v` deletes it.
+
 ### Hybrid mode (hot reload)
 
 ```bash
@@ -134,11 +144,27 @@ npm run dev        # backend + frontend + multiplayer, one terminal
 
 Only `postgres` and `redis` run in Docker (via `docker-compose.infra.yml`). The backend process inherits your shell environment — including whatever `claude login` has authenticated on your host — so agent runs use your Claude subscription automatically. In **Settings → AI Configuration → Claude Code**, leave the auth mode on **Hybrid / host login** (the default).
 
+`npm run setup` also adds an `HR_ENCRYPTION_KEYS` line to `backend/.env` if there isn't one, so employee records can be encrypted. Keep that file: records encrypted with its key can't be read without it.
+
 All three host processes run in a single terminal with color-coded logs. Ctrl-C stops them; `npm run stop` tears down the infra containers.
 
 ### Switching between modes
 
 The database is the same shape either way, so you can swap modes against the same data. Stop the current mode first (`Ctrl-C` + `npm run stop` for Hybrid, `docker compose down` for Full Docker), then start the other. The stored `claude_auth_mode` on your organization determines which path agent runs take — update it in Settings when you switch.
+
+Going from Full Docker to Hybrid, give the host backend the same `ENCRYPTION_KEY`, or the tokens Full Docker stored can't be read. Copy it into `backend/.env` (skip this if you set `ENCRYPTION_KEY` yourself):
+
+```bash
+key=$(docker compose run --rm --no-deps --entrypoint cat backend /data/secrets/encryption_key) && [ -n "$key" ] && echo "ENCRYPTION_KEY=$key" >> backend/.env
+```
+
+Do the same for employee records, or the ones stored in Full Docker can't be read. This puts Full Docker's HR key first in `backend/.env` and keeps the one setup generated after it, so records saved under either stay readable. Running it twice changes nothing:
+
+```bash
+key=$(docker compose run --rm --no-deps --entrypoint cat backend /data/secrets/hr_encryption_keys) && [ -n "$key" ] && old=$(sed -n 's/^HR_ENCRYPTION_KEYS=//p' backend/.env) && case ",$old," in *",$key,"*) ;; *) grep -v '^HR_ENCRYPTION_KEYS=' backend/.env > backend/.env.new && echo "HR_ENCRYPTION_KEYS=$key${old:+,$old}" >> backend/.env.new && mv backend/.env.new backend/.env ;; esac
+```
+
+The other way round, give Full Docker both keys, the one from `backend/.env` first, so the records stored in either mode stay readable. Set `HR_ENCRYPTION_KEYS` in the environment you start Full Docker with to `<the value in backend/.env>,<the contents of /data/secrets/hr_encryption_keys>`. A value in the environment replaces the generated key rather than adding to it. Stored tokens need nothing: tokens saved in Hybrid under the default key are re-encrypted on the next Full Docker start.
 
 ## Try the included examples
 

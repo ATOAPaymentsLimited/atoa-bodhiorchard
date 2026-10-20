@@ -39,6 +39,8 @@ from pathlib import Path
 import pytest
 import pytest_asyncio
 from alembic.config import Config
+from fastapi import FastAPI
+from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
@@ -47,6 +49,11 @@ from sqlalchemy.ext.asyncio import (
 from testcontainers.postgres import PostgresContainer
 
 from alembic import command
+from app.api.router import api_router
+from app.api.v1._hr_errors import register_hr_errors
+from app.api.v1._leave_errors import register_leave_errors
+from app.core.deps import get_db
+from app.services.permission_seeder import seed_permissions
 
 
 @pytest.fixture(scope="session")
@@ -81,11 +88,18 @@ def pg_async_url(pg_container: PostgresContainer) -> str:
 
 
 @pytest.fixture(scope="session")
-def _apply_migrations(pg_container: PostgresContainer, pg_async_url: str) -> str:
+def _apply_migrations(
+    pg_container: PostgresContainer,
+    pg_async_url: str,
+) -> str:
     """Run ``alembic upgrade head`` against the ephemeral container.
 
     Runs once per session. Returns the asyncpg URL so downstream fixtures
     can depend on this fixture by name to enforce migration order.
+
+    Alembic's env.py runs the migrations with ``asyncio.run`` on a loop of
+    its own; tests run on pytest-asyncio's session loop, which this
+    doesn't touch.
     """
     backend_root = Path(__file__).resolve().parents[2]
     alembic_cfg = Config(str(backend_root / "alembic.ini"))
@@ -123,3 +137,30 @@ async def pg_session_factory(
         yield factory
     finally:
         await engine.dispose()
+
+
+@pytest_asyncio.fixture
+async def client(
+    pg_session_factory: async_sessionmaker[AsyncSession],
+) -> AsyncIterator[AsyncClient]:
+    """The real API router on the test database."""
+    async with pg_session_factory() as db:
+        await seed_permissions(db)
+        await db.commit()
+    app = FastAPI()
+    app.include_router(api_router)
+    register_leave_errors(app)
+    register_hr_errors(app)
+
+    async def _db() -> AsyncIterator[AsyncSession]:
+        async with pg_session_factory() as session:
+            try:
+                yield session
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
+
+    app.dependency_overrides[get_db] = _db
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as http:
+        yield http

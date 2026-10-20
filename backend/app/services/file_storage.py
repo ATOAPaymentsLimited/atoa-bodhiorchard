@@ -18,6 +18,7 @@ Provides a unified interface for uploading, downloading, and deleting files.
 Storage backend is selected via environment variables at startup.
 """
 
+import os
 from pathlib import Path
 
 import aioboto3
@@ -247,7 +248,20 @@ class FileStorage:
         """Store file on local disk under self.local_dir."""
         dest = self._safe_local_path(full_path)
         dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes(data)
+        # Write then rename, so a crash mid-write never leaves a truncated
+        # file in place of a good one (rewrites happen, e.g. key rotation).
+        # ``dest`` is already contained; the check is repeated here, on the
+        # exact paths written, because static analysis (CodeQL's path
+        # injection query) only trusts a realpath + startswith check made
+        # where the path is used, not one inside ``safe_join``.
+        root = os.path.realpath(self.local_dir) + os.sep
+        target = os.path.realpath(dest)
+        partial = os.path.realpath(f"{target}.partial")
+        if not (target.startswith(root) and partial.startswith(root)):
+            raise FileStorageError("Invalid storage path: directory traversal detected")
+        with open(partial, "wb") as handle:
+            handle.write(data)
+        os.replace(partial, target)
         # ``info`` (not ``debug``) so the active backend is visible at
         # default log verbosity. Matches the new info-level ``file_uploaded_s3``
         # — operators can grep either event to confirm which path ran.

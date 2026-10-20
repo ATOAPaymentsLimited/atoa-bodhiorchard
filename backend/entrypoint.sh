@@ -34,8 +34,12 @@ if [ "${BODHIORCHARD_EGRESS_FIREWALL:-0}" = "1" ]; then
     fi
 fi
 
+# Per-install SECRET_KEY, ENCRYPTION_KEY, HR key and bridge secret (Full Docker).
+. "$(dirname "$0")/docker/instance-secrets.sh"
+
 echo "==> Running database migrations"
 alembic upgrade head
+rotate_from_default_key
 
 echo "==> Starting uvicorn"
 # Single worker is REQUIRED. A lot of backend state is in-process:

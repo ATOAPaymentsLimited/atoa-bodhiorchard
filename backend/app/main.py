@@ -28,9 +28,13 @@ from sqlalchemy import select
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 
 from app.api.router import api_router
+from app.api.v1._hr_errors import register_hr_errors
+from app.api.v1._leave_errors import register_leave_errors
+from app.core.body_limit import BodySizeLimitMiddleware
 from app.core.event_loop import configure_event_loop_policy
 from app.core.logging import setup_logging
 from app.core.middleware import RequestLoggingMiddleware
+from app.services.leave.digest_scheduler import run_forever as run_leave_digest
 from app.services.mcp_audit_cleanup import run_forever as run_audit_cleanup
 from app.services.minigame_nudge import run_forever as run_minigame_nudge
 from app.services.pr_merge_worker import WorkerPool, start_pr_merge_workers
@@ -101,13 +105,17 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     from app.database import AsyncSessionLocal
     from app.services.permission_seeder import seed_permissions
 
+    # Fatal on failure: every route behind the workspace gate depends on the
+    # seeded ``workspace:engineering`` grants, so booting without them would
+    # lock out every non-owner with a silent 403.
     try:
         async with AsyncSessionLocal() as session:
             await seed_permissions(session)
             await session.commit()
         logger.info("permission_seed_synced")
     except Exception:
-        logger.warning("permission_seed_failed_at_startup")
+        logger.exception("permission_seed_failed_at_startup")
+        raise
 
     # 4b. Reconcile orphan scans. Any scan still in a non-terminal
     # status with no running task (i.e. updated_at older than 60s at
@@ -276,6 +284,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # month's org-wide top scorer (idempotent; the feature's only economy hook).
     quiz_rollup_task = asyncio.create_task(run_quiz_monthly_rollup())
 
+    # 8g. Daily who's-out Slack post — 60s tick, at most one post per org-day.
+    leave_digest_task = asyncio.create_task(run_leave_digest())
+
     # 9. PR-merge Redis-stream worker pool. One consumer per
     # (org, repo) stream; supervisor task spawns consumers lazily as
     # streams appear in the registry. Orphan recovery re-publishes
@@ -314,6 +325,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     minigame_nudge_task.cancel()
     quiz_batch_task.cancel()
     quiz_scheduler_task.cancel()
+    leave_digest_task.cancel()
     quiz_rollup_task.cancel()
     if pr_merge_pool is not None:
         await pr_merge_pool.stop()
@@ -333,6 +345,8 @@ app = FastAPI(
     redirect_slashes=False,
 )
 
+# Inside the logger (added first), so refused bodies are logged too.
+app.add_middleware(BodySizeLimitMiddleware)
 app.add_middleware(RequestLoggingMiddleware)
 app.add_middleware(
     CORSMiddleware,
@@ -383,6 +397,8 @@ async def _block_cors_on_mcp(request: Request, call_next: RequestResponseEndpoin
 app.add_middleware(BaseHTTPMiddleware, dispatch=_block_cors_on_mcp)
 
 app.include_router(api_router)
+register_leave_errors(app)
+register_hr_errors(app)
 
 
 @app.get("/")

@@ -12,7 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Authentication endpoints: login, register, and current user retrieval."""
+"""Authentication endpoints: login, token refresh, and current user retrieval.
+
+There is deliberately no self-registration: members join an org only
+through an admin invite (``POST /v1/members``) or the setup wizard, so
+nobody can add themselves to an org by knowing its slug.
+"""
 
 import uuid
 from typing import Any
@@ -34,15 +39,13 @@ from app.core.security import (
     verify_password,
     verify_token,
 )
-from app.models.organization import Organization
-from app.models.user import OrgToUser, User, UserRole
+from app.models.user import User
 from app.repositories.organization import OrganizationRepository
 from app.repositories.user import UserRepository
 from app.schemas.auth import (
     ChangePasswordRequest,
     LoginRequest,
     RefreshRequest,
-    RegisterRequest,
     TokenResponse,
 )
 from app.schemas.user import UserRead
@@ -79,7 +82,13 @@ async def login(
     # Resolve user
     user_repo = UserRepository(db)
     user = await user_repo.get_by_email_in_org(org.id, body.email)
-    if user is None or not verify_password(body.password, user.password_hash):
+    # Deactivated accounts get the same generic error as a bad password so
+    # the response doesn't confirm which emails exist.
+    if (
+        user is None
+        or not user.is_active
+        or not verify_password(body.password, user.password_hash)
+    ):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid credentials",
@@ -135,8 +144,8 @@ async def refresh(
     Raises:
         HTTPException: If the refresh token is invalid or expired.
     """
-    payload = verify_token(body.refresh_token)
-    if payload is None or payload.get("type") != "refresh":
+    payload = verify_token(body.refresh_token, expected_type="refresh")
+    if payload is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or expired refresh token",
@@ -152,7 +161,7 @@ async def refresh(
     # Verify user still exists and is active
     user_repo = UserRepository(db)
     user = await user_repo.get_by_id(uuid.UUID(user_id))
-    if user is None:
+    if user is None or not user.is_active:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="User not found",
@@ -167,15 +176,7 @@ async def refresh(
         )
 
     # Validate membership still exists
-    from sqlalchemy import select as sa_select
-
-    membership = await db.execute(
-        sa_select(OrgToUser).where(
-            OrgToUser.user_id == user.id,
-            OrgToUser.org_id == uuid.UUID(org_id),
-        )
-    )
-    if membership.scalar_one_or_none() is None:
+    if await user_repo.get_membership(user.id, uuid.UUID(org_id)) is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="User is no longer a member of this organization",
@@ -190,69 +191,6 @@ async def refresh(
         refresh_token=refresh_token,
         expires_in=settings.auth.access_token_expire_minutes * 60,
     )
-
-
-@router.post("/register", response_model=UserRead, status_code=status.HTTP_201_CREATED)
-async def register(
-    body: RegisterRequest,
-    db: AsyncSession = Depends(get_db),
-) -> User:
-    """Register a new user account within an organization.
-
-    Creates the organization if it does not exist and org_name is provided.
-
-    Args:
-        body: Registration data including email, password, and org slug.
-        db: The async database session.
-
-    Returns:
-        The newly created User.
-
-    Raises:
-        HTTPException: If the organization is not found or email is taken.
-    """
-    # Resolve or create organization
-    org_repo = OrganizationRepository(db)
-    org = await org_repo.get_by_slug(body.org_slug)
-
-    if org is None:
-        if body.org_name:
-            org = Organization(name=body.org_name, slug=body.org_slug)
-            await org_repo.create(org)
-        else:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Organization not found. Provide org_name to create one.",
-            )
-
-    # Check for duplicate email
-    user_repo = UserRepository(db)
-    if await user_repo.get_by_email_in_org(org.id, body.email) is not None:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Email already registered in this organization",
-        )
-
-    user = User(
-        email=body.email,
-        name=body.name,
-        password_hash=hash_password(body.password),
-    )
-    created = await user_repo.create(user)
-
-    # Create org membership — no role_id yet; admins assign via the
-    # Members UI, which is when the user becomes eligible for BUDs.
-    membership = OrgToUser(user_id=created.id, org_id=org.id)
-    db.add(membership)
-    await db.flush()
-
-    # Set transient org context for the response serialization
-    created.org_id = org.id
-    created.role = UserRole.DEVELOPER
-    created.role_id = None
-    created.role_ref = None
-
-    return created
 
 
 @router.get("/me", response_model=UserRead)
