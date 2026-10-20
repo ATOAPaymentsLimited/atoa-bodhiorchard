@@ -22,16 +22,29 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.deps import get_current_user, get_db
+from app.core.deps import (
+    PermissionSet,
+    get_current_user,
+    get_db,
+    get_permission_set,
+    require_permissions,
+)
 from app.core.encryption import decrypt_secret
 from app.core.security import hash_password
 from app.models.user import OrgToUser, User
 from app.repositories.organization import OrganizationRepository
+from app.repositories.slack_identity import SlackIdentityRepository
 from app.repositories.user import UserRepository
+from app.services.slack_identity import assert_can_relink
 
 logger = structlog.get_logger(__name__)
 
-router = APIRouter(tags=["settings-slack"])
+# Linking a Slack ID decides where a user's DMs go, including password
+# resets, so every route here is an integration-admin action.
+router = APIRouter(
+    tags=["settings-slack"],
+    dependencies=[Depends(require_permissions("integrations:configure"))],
+)
 
 
 class SlackMemberPreview(BaseModel):
@@ -181,6 +194,7 @@ async def sync_slack_members(
 async def link_slack_members(
     body: SlackLinkRequest,
     current_user: User = Depends(get_current_user),
+    perms: PermissionSet = Depends(get_permission_set),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, int]:
     """Bulk-link Slack IDs to Bodhiorchard users.
@@ -209,8 +223,13 @@ async def link_slack_members(
         except ValueError:
             continue
 
-        user = await user_repo.get_by_id(uid)
+        # ``User`` has no org column, so look the target up through its
+        # membership — otherwise any user id in any org could be relinked.
+        user = await user_repo.get_by_id_with_membership(uid, org.id)
         if user:
+            # The link also says who clicks Approve in Slack: guard it like
+            # managing the account.
+            await assert_can_relink(db, actor=perms, target=user, org_id=org.id, slack_id=slack_id)
             user.slack_id = slack_id
             linked += 1
 
@@ -230,6 +249,7 @@ async def link_slack_members(
 async def unlink_slack_member(
     body: dict[str, str],
     current_user: User = Depends(get_current_user),
+    perms: PermissionSet = Depends(get_permission_set),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, bool]:
     """Remove the Slack link from a Bodhiorchard user.
@@ -259,6 +279,13 @@ async def unlink_slack_member(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="No user linked with this Slack ID",
         )
+    target = await user_repo.get_by_id_with_membership(user.id, org.id)
+    if target is None:
+        # Never unlink without the guard below.
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="No member linked with this Slack ID"
+        )
+    await assert_can_relink(db, actor=perms, target=target, org_id=org.id, slack_id=None)
 
     user.slack_id = None
     await db.flush()
@@ -301,7 +328,9 @@ async def import_slack_members(
 
     for item in body.imports:
         existing = await user_repo.get_by_email_in_org(org.id, item.slack_email)
-        if existing is not None:
+        # A Slack account maps to one member: never import a second.
+        taken = await SlackIdentityRepository(db).members_with_slack_id(org.id, item.slack_id)
+        if existing is not None or taken:
             skipped.append(item.slack_email)
             continue
 

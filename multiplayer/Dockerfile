@@ -25,5 +25,10 @@ RUN npm ci --omit=dev --no-audit --no-fund
 
 COPY --from=builder /app/multiplayer/dist ./dist
 
+COPY multiplayer/docker-entrypoint.sh ./docker-entrypoint.sh
+
+# The room server handles untrusted client messages: don't run it as root.
+USER node
+
 EXPOSE 2567
-CMD ["node", "dist/multiplayer/src/main.js"]
+CMD ["sh", "./docker-entrypoint.sh"]

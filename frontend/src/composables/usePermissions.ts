@@ -14,6 +14,7 @@
 
 import { computed } from 'vue'
 import { useAuthStore } from '@/stores/auth'
+import { canOpenWorkspace } from '@/utils/workspace'
 
 export function usePermissions() {
   const authStore = useAuthStore()
@@ -32,6 +33,26 @@ export function usePermissions() {
   const isOrgAdmin = computed(
     () => authStore.user?.role === 'org_owner' || authStore.user?.role === 'admin',
   )
+  // The org owner alone may change HR-held fields on their own record
+  // (e.g. their own leave policy); the API applies the same rule.
+  const isOrgOwner = computed(() => authStore.user?.role === 'org_owner')
+
+  // Engineering workspace (BUDs, bugs, repos, garden, games). People-only
+  // roles such as sales and HR don't hold it; see utils/workspace.ts.
+  const canAccessEngineering = computed(() =>
+    canOpenWorkspace(authStore.user?.permissions, 'engineering'),
+  )
+
+  // People workspace: directory (work details) and HR record management.
+  const canViewEmployees = computed(() =>
+    hasAnyPermission('employees:view', 'employees:manage'),
+  )
+  const canManageEmployees = computed(() => hasPermission('employees:manage'))
+  const canSeeEmployeeDocuments = computed(() => hasPermission('employees:documents'))
+  // Leave: approving anyone's requests (HR), and configuring policies,
+  // types, holidays and balances.
+  const canApproveLeave = computed(() => hasPermission('leave:approve'))
+  const canConfigureLeave = computed(() => hasPermission('leave:configure'))
 
   // Sidebar visibility
   const canApprove = computed(() => hasPermission('backlog:approve'))
@@ -83,6 +104,13 @@ export function usePermissions() {
     hasPermission,
     hasAnyPermission,
     isOrgAdmin,
+    isOrgOwner,
+    canAccessEngineering,
+    canViewEmployees,
+    canManageEmployees,
+    canSeeEmployeeDocuments,
+    canApproveLeave,
+    canConfigureLeave,
     canApprove,
     canCreateBuds,
     canEditBuds,

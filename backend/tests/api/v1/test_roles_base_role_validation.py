@@ -36,10 +36,37 @@ from fastapi import HTTPException
 from pydantic import ValidationError
 
 from app.api.v1 import roles as role_handlers
+from app.core.deps import PermissionSet
 from app.models.role import RoleScopeType
 from app.schemas.role import RoleCreate, RoleRead, RoleUpdate
 
 # ``fake_user`` and ``fake_db`` come from tests/api/v1/conftest.py.
+
+# These tests pin base-role validation; the grant ceiling has its own tests
+# in tests/services/test_role_grants.py, so the caller here is the owner.
+_OWNER = PermissionSet(ids=frozenset(), is_owner=True)
+
+
+@pytest.fixture
+def fake_user() -> SimpleNamespace:
+    """Caller holding some other role, so the own-role edit guard doesn't fire."""
+    return SimpleNamespace(
+        id=uuid.uuid4(), org_id=uuid.uuid4(), name="Tester", role_id=uuid.uuid4()
+    )
+
+
+@pytest.fixture(autouse=True)
+def _skip_grant_ceiling_lookup(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        role_handlers, "assert_can_grant_permission_ids", AsyncMock(return_value=set())
+    )
+    monkeypatch.setattr(
+        role_handlers,
+        "with_inherited_workspace",
+        AsyncMock(side_effect=lambda _db, _base, ids: ids),
+    )
+    monkeypatch.setattr(role_handlers, "permissions_for_role", AsyncMock(return_value=set()))
+    monkeypatch.setattr(role_handlers, "assert_can_manage_role", AsyncMock(return_value=None))
 
 
 def _patch_role_repo(
@@ -111,7 +138,9 @@ async def test_create_role_rejects_custom_base_role(
         permission_ids=[uuid.uuid4()],
     )
     with pytest.raises(HTTPException) as excinfo:
-        await role_handlers.create_role(body=body, current_user=fake_user, db=fake_db)
+        await role_handlers.create_role(
+            body=body, current_user=fake_user, perms=_OWNER, db=fake_db
+        )
     assert excinfo.value.status_code == 400
     assert "system role" in excinfo.value.detail
 
@@ -137,7 +166,9 @@ async def test_create_role_rejects_inactive_system_base(
         permission_ids=[uuid.uuid4()],
     )
     with pytest.raises(HTTPException) as excinfo:
-        await role_handlers.create_role(body=body, current_user=fake_user, db=fake_db)
+        await role_handlers.create_role(
+            body=body, current_user=fake_user, perms=_OWNER, db=fake_db
+        )
     assert excinfo.value.status_code == 400
 
 
@@ -173,7 +204,9 @@ async def test_create_role_success_returns_read_dto(
         base_role_id=good_base.id,
         permission_ids=[uuid.uuid4()],
     )
-    result = await role_handlers.create_role(body=body, current_user=fake_user, db=fake_db)
+    result = await role_handlers.create_role(
+        body=body, current_user=fake_user, perms=_OWNER, db=fake_db
+    )
     assert result == expected
 
 
@@ -220,7 +253,9 @@ async def test_create_role_rejects_unknown_base_role(
         permission_ids=[uuid.uuid4()],
     )
     with pytest.raises(HTTPException) as excinfo:
-        await role_handlers.create_role(body=body, current_user=fake_user, db=fake_db)
+        await role_handlers.create_role(
+            body=body, current_user=fake_user, perms=_OWNER, db=fake_db
+        )
     assert excinfo.value.status_code == 400
 
 
@@ -240,7 +275,9 @@ async def test_update_role_rejects_invalid_base(
 
     body = RoleUpdate(base_role_id=bad_base.id)
     with pytest.raises(HTTPException) as excinfo:
-        await role_handlers.update_role(role_id=target.id, body=body, _user=fake_user, db=fake_db)
+        await role_handlers.update_role(
+            role_id=target.id, body=body, current_user=fake_user, perms=_OWNER, db=fake_db
+        )
     assert excinfo.value.status_code == 400
     # The repository's update path must not have replaced permissions
     # when validation failed.
@@ -259,5 +296,7 @@ async def test_update_role_rejects_system_role_modification(
 
     body = RoleUpdate(name="Renamed System Role")
     with pytest.raises(HTTPException) as excinfo:
-        await role_handlers.update_role(role_id=target.id, body=body, _user=fake_user, db=fake_db)
+        await role_handlers.update_role(
+            role_id=target.id, body=body, current_user=fake_user, perms=_OWNER, db=fake_db
+        )
     assert excinfo.value.status_code == 403
