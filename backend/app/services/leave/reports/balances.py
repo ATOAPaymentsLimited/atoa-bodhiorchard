@@ -20,14 +20,27 @@ the same builder the summary and approvals use.
 """
 
 import uuid
+from decimal import Decimal
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.schemas.leave_report_filters import BalanceFilters
 from app.schemas.leave_reports import BalanceReport, BalanceRow
+from app.services.leave.balances import BalanceLine
 from app.services.leave.report_scope import ReportScope
 from app.services.leave.reports.balance_lines import balance_lines, leave_year_for
 from app.services.leave.reports.population import people, scoped_ids
+
+
+def encashable(line: BalanceLine) -> Decimal | None:
+    """Unused days paid out if they left today, for an encashable type, else None.
+
+    What is earned so far plus adjustments, less leave already taken.
+    Pending and future leave is left out: it never happens if they leave.
+    """
+    if not line.leave_type.is_encashable or line.earned is None:
+        return None
+    return max(line.earned + line.adjustments - line.taken, Decimal(0))
 
 
 async def balance_report(
@@ -50,10 +63,12 @@ async def balance_report(
                     leave_type_id=line.leave_type.id,
                     leave_type=line.leave_type.name,
                     allocated=line.allocated,
+                    earned=line.earned,
                     adjustments=line.adjustments,
                     used=line.used,
                     pending=line.pending,
                     available=line.available,
+                    encashable=encashable(line),
                     lop_days=mine.lop_days,
                 )
             )
