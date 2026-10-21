@@ -38,9 +38,11 @@ from app.models.notification import Notification, NotificationType
 from app.schemas.leave import HighLeave
 from app.services.background import spawn
 from app.services.event_bus import publish
+from app.services.leave.calendar_sync.sync import sync_request
 from app.services.leave.messages import compose_decision_message, compose_request_message
 from app.services.leave.slack_blocks import escape
 from app.services.leave.slack_prompts import refresh_prompts, send_prompts
+from app.services.leave.slack_status.apply import refresh_after_change
 from app.services.notifications import NotificationCategory
 from app.services.slack_dm import send_dm
 
@@ -60,6 +62,8 @@ class Notice:
     prompt_request_id: uuid.UUID | None = None
     # Afterwards, swap earlier prompts for this request to its outcome.
     refresh_request_id: uuid.UUID | None = None
+    # Bring the requester's Google Calendar and Slack status in line with it.
+    sync_request_id: uuid.UUID | None = None
 
     def send(self) -> None:
         """Push the in-app rows and start the Slack messages. Call after commit."""
@@ -73,6 +77,9 @@ class Notice:
             spawn(send_dm(self.org_id, self.user_ids, self.category, self.slack_text))
         if self.refresh_request_id:
             spawn(refresh_prompts(self.org_id, self.refresh_request_id))
+        if self.sync_request_id:
+            spawn(sync_request(self.org_id, self.sync_request_id))
+            spawn(refresh_after_change(self.org_id, self.sync_request_id))
 
 
 def _stage(
@@ -143,6 +150,8 @@ def stage_new_request(
         # Escaped: a name like "<https://evil|Open>" must not become a link.
         else f"{escape(message)} <{settings.frontend_url}{link}|Open in Bodhiorchard>",
         prompt_request_id=None if auto_approved else request.id,
+        # A pending request has nothing on the calendar yet.
+        sync_request_id=request.id if auto_approved else None,
     )
     return _stage(
         db,
@@ -165,6 +174,8 @@ def stage_decision(
         category=NotificationCategory.LEAVE_UPDATES,
         slack_text=f"{escape(message)} <{settings.frontend_url}/leave|See details>",
         refresh_request_id=request.id,
+        # A rejected request never had events or a status to take off.
+        sync_request_id=request.id if request.status == LeaveStatus.APPROVED else None,
     )
     return _stage(
         db,
@@ -177,11 +188,14 @@ def stage_decision(
 
 
 def after_cancel(org_id: uuid.UUID, request: LeaveRequest) -> Notice:
-    """Approvers' Slack prompts show the request was cancelled."""
+    """Approvers' Slack prompts show the request was cancelled; calendar events go."""
     return Notice(
         org_id=org_id,
         user_ids=set(),
         category=NotificationCategory.LEAVE_APPROVALS,
         slack_text="",
         refresh_request_id=request.id,
+        # Only an approved request (decided, or approved automatically) has
+        # anything on the calendar or Slack; cancelling a pending one doesn't.
+        sync_request_id=request.id if request.decided_at is not None else None,
     )
