@@ -110,10 +110,15 @@ class BalanceRow(PersonColumns):
     leave_type_id: uuid.UUID
     leave_type: str
     allocated: Decimal | None
+    # Of ``allocated``, what is released by today (all of it when upfront).
+    earned: Decimal | None
     adjustments: Decimal
     used: Decimal
     pending: Decimal
     available: Decimal | None
+    # Unused days paid out at exit, as of today; None for a type that isn't
+    # encashable. Never below zero: overdrawn leave isn't owed back here.
+    encashable: Decimal | None
     lop_days: Decimal
 
 

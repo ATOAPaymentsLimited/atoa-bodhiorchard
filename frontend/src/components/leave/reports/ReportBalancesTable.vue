@@ -14,17 +14,26 @@
  * limitations under the License.
  -->
 
-<!-- Balances per member and leave type for a leave year. -->
+<!-- Balances per member and leave type for a leave year. "Encashable at exit"
+     is what would be paid out if they left today ('—' for other types). -->
 <template>
+  <p v-if="accruing" class="legend text-caption text-medium-emphasis">
+    Some leave here is earned monthly. Its Available includes what will be earned by the dates
+    already booked, so it can be more than earned so far minus used and pending.
+  </p>
   <v-data-table item-value="key" :headers="HEADERS" :items="rows" density="comfortable" :items-per-page="50">
     <template #[`item.name`]="{ item }"><ReportPersonCell :row="item" /></template>
     <template #[`item.allocated`]="{ item }">{{ limit(item.allocated) }}</template>
+    <template #[`item.earned`]="{ item }">{{ limit(item.earned) }}</template>
     <template #[`item.used`]="{ item }">{{ formatDays(toNumber(item.used)) }}</template>
     <template #[`item.pending`]="{ item }">{{ formatDays(toNumber(item.pending)) }}</template>
     <template #[`item.available`]="{ item }">
       <span :class="{ 'text-error': toNumberOrNull(item.available) !== null && toNumber(item.available) < 0 }">
         {{ limit(item.available) }}
       </span>
+    </template>
+    <template #[`item.encashable`]="{ item }">
+      {{ toNumberOrNull(item.encashable) === null ? '—' : formatDays(toNumber(item.encashable)) }}
     </template>
     <template #[`item.lop_days`]="{ item }">
       <span :class="{ 'text-warning': toNumber(item.lop_days) > 0 }">{{ formatDays(toNumber(item.lop_days)) }}</span>
@@ -46,14 +55,25 @@ const rows = computed(() =>
   (props.report?.rows ?? []).map(r => ({ ...r, key: `${r.user_id}:${r.leave_type_id}` })),
 )
 
+// Any type still building up (earned < allocated) means it's earned monthly.
+const accruing = computed(() =>
+  (props.report?.rows ?? []).some(r => {
+    const earned = toNumberOrNull(r.earned)
+    const allocated = toNumberOrNull(r.allocated)
+    return earned !== null && allocated !== null && earned < allocated
+  }),
+)
+
 const HEADERS = [
   { title: 'Employee', key: 'name', sortable: true },
   { title: 'Year', key: 'leave_year', sortable: true },
   { title: 'Leave type', key: 'leave_type', sortable: true },
   { title: 'Allocated', key: 'allocated', align: 'end' },
+  { title: 'Earned so far', key: 'earned', align: 'end' },
   { title: 'Used', key: 'used', align: 'end' },
   { title: 'Pending', key: 'pending', align: 'end' },
   { title: 'Available', key: 'available', align: 'end' },
+  { title: 'Encashable at exit', key: 'encashable', align: 'end' },
   { title: 'Loss of pay (year)', key: 'lop_days', align: 'end' },
 ] as const
 
@@ -62,3 +82,10 @@ function limit(value: Decimalish | null): string {
   return n === null ? 'No limit' : formatDays(n)
 }
 </script>
+
+<style scoped>
+.legend {
+  padding: 12px 16px 0;
+  margin: 0;
+}
+</style>

@@ -35,6 +35,7 @@ import {
   swatchColor,
   toNumber,
 } from '@/utils/leave'
+import { bookedAheadNote, earningCaption } from '@/utils/leaveAccrual'
 
 const props = defineProps<{
   balances: Balance[]
@@ -58,7 +59,10 @@ function leaveCard(balance: Balance) {
       value: meter ? formatDays(available) : 'No limit',
       unit: meter ? (available === 1 ? 'day left' : 'days left') : '',
       meter,
-      caption: meter ? balanceCaption(balance) : `${pluralDays(toNumber(balance.used))} taken`,
+      caption: meter
+        ? (earningCaption(balance) ?? balanceCaption(balance))
+        : `${pluralDays(toNumber(balance.used))} taken`,
+      note: bookedAheadNote(balance),
       tag: highlight ? 'This request' : balance.is_paid ? '' : 'Unpaid',
       highlight,
     },
@@ -81,6 +85,7 @@ function optionalCard(optional: OptionalHolidayBalance) {
           ? `${optional.used} used · ${optional.pending} pending`
           : `${optional.used} used`,
       tag: '',
+      note: '',
       highlight: false,
     },
   }
@@ -97,6 +102,7 @@ function lopCard(days: number) {
       meter: null,
       caption: 'Leave past your balance this year',
       tag: 'Unpaid',
+      note: '',
       highlight: false,
     },
   }
