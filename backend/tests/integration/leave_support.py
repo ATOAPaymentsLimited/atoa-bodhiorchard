@@ -22,7 +22,7 @@ start failing in December.
 from __future__ import annotations
 
 import uuid
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 
 from sqlalchemy import select
@@ -31,7 +31,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.core.deps import PermissionSet
 from app.core.security import create_access_token
 from app.models.employee_profile import EmployeeProfile
-from app.models.leave_request import LeaveKind
+from app.models.leave_request import LeaveKind, LeaveRequest, LeaveStatus
 from app.models.leave_type import LeaveType
 from app.models.organization import Organization
 from app.models.permission import Permission
@@ -152,3 +152,53 @@ def as_user(user: uuid.UUID, org: uuid.UUID) -> dict[str, str]:
     """Auth headers for ``user`` signed in to ``org``."""
     token = create_access_token({"sub": str(user), "org_id": str(org)})
     return {"Authorization": f"Bearer {token}"}
+
+
+async def add_request(
+    factory: Factory,
+    org: uuid.UUID,
+    user: uuid.UUID,
+    start: date,
+    end: date,
+    days: str,
+    *,
+    type_id: uuid.UUID | None = None,
+    lop: str = "0",
+    kind: LeaveKind = LeaveKind.LEAVE,
+    status: LeaveStatus = LeaveStatus.APPROVED,
+    decided_by: uuid.UUID | None = None,
+    decided_at: datetime | None = None,
+) -> None:
+    """Insert a request as booked, skipping the submit rules (dates may be past)."""
+    async with factory() as db:
+        policy = await ensure_default_policy(db, org)
+        db.add(
+            LeaveRequest(
+                org_id=org, user_id=user, policy_id=policy.id, kind=kind,
+                leave_type_id=type_id if kind == LeaveKind.LEAVE else None,
+                start_date=start, end_date=end, days=Decimal(days), lop_days=Decimal(lop),
+                status=status, decided_by=decided_by, decided_at=decided_at,
+            )
+        )  # fmt: skip
+        await db.commit()
+
+
+async def team(factory: Factory) -> tuple[uuid.UUID, dict[str, uuid.UUID], uuid.UUID]:
+    """HR, a manager with one report, a skip-level boss and a bystander."""
+    org, ids, casual = await setup_org(factory, "Hr", "Boss", "Mgr", "Emp", "Peer")
+    people = dict(zip(("hr", "boss", "mgr", "emp", "peer"), ids, strict=True))
+    await give_role(factory, org, people["hr"], "hr")
+    await report_to(factory, org, people["mgr"], people["boss"])
+    await report_to(factory, org, people["emp"], people["mgr"])
+    return org, people, casual
+
+
+async def add_member_without_profile(factory: Factory, org: uuid.UUID, name: str) -> uuid.UUID:
+    """An active member of ``org`` with no employee profile (default policy)."""
+    async with factory() as db:
+        user = User(email=f"np-{uuid.uuid4().hex[:6]}@acme.dev", name=name, password_hash="x")
+        db.add(user)
+        await db.flush()
+        db.add(OrgToUser(user_id=user.id, org_id=org))
+        await db.commit()
+        return user.id
