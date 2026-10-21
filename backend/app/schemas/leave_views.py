@@ -18,10 +18,11 @@ from datetime import date
 from decimal import Decimal
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from app.models.leave_request import HalfDay, LeaveKind, LeaveStatus
 from app.schemas.leave import HolidayRead, LeaveRequestRead, LeaveTypeBrief, PersonRef
+from app.schemas.leave_summary import Balance
 
 
 class AlsoOut(BaseModel):
@@ -33,15 +34,41 @@ class AlsoOut(BaseModel):
     end_date: date
 
 
+class LastLeave(BaseModel):
+    """The requester's most recent approved leave that has started."""
+
+    leave_type: str | None
+    start_date: date
+    end_date: date
+    days: Decimal
+
+
 class ApprovalItem(BaseModel):
-    """One request in the approvals queue."""
+    """One request in the approvals queue.
+
+    ``balances``, ``balance_year`` and ``last_leave`` are filled for pending
+    requests only: they help decide, and are history once decided.
+    """
 
     request: LeaveRequestRead
     route: Literal["manager", "hr_queue", "hr_override"]
     designation: str | None
     department: str | None
     balance_after: Decimal | None
+    # The leave year balance_after is for: the request's own, which may not
+    # be ``balance_year`` (the requester's current one).
+    balance_after_year: int | None = None
     also_out: list[AlsoOut]
+    balances: list[Balance] = []
+    balance_year: int | None = None
+    last_leave: LastLeave | None = None
+
+
+class ApprovalPage(BaseModel):
+    """The queue, and whether the decided list hit its cap (older ones left out)."""
+
+    items: list[ApprovalItem]
+    truncated: bool
 
 
 class DecisionBody(BaseModel):
@@ -56,6 +83,8 @@ class ApprovalCount(BaseModel):
     pending: int
     # Whether the caller approves anything at all (shows the nav item).
     is_approver: bool
+    # Whether anyone reports to the caller (they can see reports on them).
+    has_reports: bool
 
 
 class CalendarEntry(BaseModel):
@@ -85,3 +114,29 @@ class CalendarRead(BaseModel):
 
     entries: list[CalendarEntry]
     holidays: list[HolidayRead]
+
+
+class ApprovalFilters(BaseModel):
+    """Optional narrowing for the approvals queue; dates match overlapping leave."""
+
+    start: date | None = None
+    end: date | None = None
+    kind: LeaveKind | None = None
+    leave_type_id: uuid.UUID | None = None
+    user_id: uuid.UUID | None = None
+
+    @model_validator(mode="after")
+    def _range(self) -> "ApprovalFilters":
+        if self.start and self.end and self.end < self.start:
+            raise ValueError("The end date must be on or after the start date.")
+        return self
+
+    @property
+    def dated(self) -> bool:
+        return self.start is not None or self.end is not None
+
+
+class ApprovalQuery(ApprovalFilters):
+    """The queue's query string: which tab, plus the filters."""
+
+    status: Literal["pending", "decided"] = "pending"
