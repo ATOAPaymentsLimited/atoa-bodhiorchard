@@ -45,6 +45,7 @@ from app.api.v1.claude import router as claude_router
 from app.api.v1.dashboard import router as dashboard_router
 from app.api.v1.design_system import router as design_system_router
 from app.api.v1.employee_documents import router as employee_documents_router
+from app.api.v1.employee_login import router as employee_login_router
 from app.api.v1.employee_sensitive import router as employee_sensitive_router
 from app.api.v1.employee_updates import router as employee_updates_router
 from app.api.v1.employees import router as employees_router
@@ -58,12 +59,14 @@ from app.api.v1.leave import router as leave_router
 from app.api.v1.leave_approvals import router as leave_approvals_router
 from app.api.v1.leave_balances import router as leave_balances_router
 from app.api.v1.leave_calendar import router as leave_calendar_router
+from app.api.v1.leave_calendar_sync import router as leave_calendar_sync_router
 from app.api.v1.leave_digest import router as leave_digest_router
 from app.api.v1.leave_history import router as leave_history_router
 from app.api.v1.leave_holidays import router as leave_holidays_router
 from app.api.v1.leave_policies import router as leave_policies_router
 from app.api.v1.leave_reports import router as leave_reports_router
 from app.api.v1.leave_reports_export import router as leave_reports_export_router
+from app.api.v1.leave_slack_status import router as leave_slack_status_router
 from app.api.v1.leave_types import router as leave_types_router
 from app.api.v1.me import router as me_router
 from app.api.v1.members import router as members_router
@@ -88,6 +91,7 @@ from app.api.v1.setup import router as setup_router
 from app.api.v1.skills import router as skills_router
 from app.api.v1.slack import router as slack_router
 from app.api.v1.slack_interactions import router as slack_interactions_router
+from app.api.v1.slack_status_callback import router as slack_status_callback_router
 from app.api.v1.standups import router as standups_router
 from app.api.v1.teams import router as teams_router
 from app.api.v1.triage_sessions import router as triage_router
@@ -122,6 +126,7 @@ for employee_part in (
     employee_updates_router,
     employee_sensitive_router,
     employee_documents_router,
+    employee_login_router,
 ):
     api_router.include_router(
         employee_part, prefix="/api/v1/employees", dependencies=PEOPLE_NO_STORE
@@ -136,6 +141,8 @@ for leave_part in (
     leave_types_router,
     leave_holidays_router,
     leave_digest_router,
+    leave_calendar_sync_router,
+    leave_slack_status_router,
     leave_reports_router,
     leave_reports_export_router,
     leave_history_router,
@@ -149,6 +156,8 @@ api_router.include_router(settings_router, prefix="/api/v1/settings")
 api_router.include_router(slack_router, prefix="/api/v1/slack")
 # Signed by Slack (no login): approve / reject leave from a DM.
 api_router.include_router(slack_interactions_router, prefix="/api/v1/slack")
+# Slack's OAuth redirect (no login): the signed state says who it's for.
+api_router.include_router(slack_status_callback_router, prefix="/api/v1/slack")
 api_router.include_router(github_webhook_router, prefix="/api/v1/webhooks")
 api_router.include_router(mcp_router)
 # Remote MCP endpoint for external LLM clients (Claude Desktop / Cursor /
