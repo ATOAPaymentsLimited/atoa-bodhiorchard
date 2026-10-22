@@ -23,7 +23,15 @@ jobs:
           script_stop: true
           script: |
             cd /opt/bodhiorchard
+            # GitHub occasionally delivers one merge as two pushes; skip the
+            # repeat once this commit has deployed. Manual runs always deploy.
+            MARKER=.git/last_deployed_sha
+            if [ "${{ github.event_name }}" = "push" ] && [ "$(cat "$MARKER" 2>/dev/null)" = "${{ github.sha }}" ]; then
+              echo "${{ github.sha }} is already deployed; skipping."
+              exit 0
+            fi
             git fetch origin main
             git checkout main
             git reset --hard origin/main
             ./deploy.sh
+            echo "${{ github.sha }}" > "$MARKER"
