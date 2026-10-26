@@ -92,3 +92,12 @@ class LeaveTypeRepository(BaseRepository[LeaveType]):
             )
         )
         return (await self._db.execute(stmt.limit(1))).scalar_one_or_none()
+
+    async def with_carry_forward(self) -> list[LeaveType]:
+        """Active types that carry unused days into the next leave year."""
+        stmt = self._scoped(
+            select(LeaveType).where(
+                LeaveType.is_active.is_(True), LeaveType.carry_forward_days > 0
+            )
+        )
+        return list((await self._db.execute(stmt)).scalars().all())
