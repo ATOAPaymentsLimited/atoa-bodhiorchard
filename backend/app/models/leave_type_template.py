@@ -72,6 +72,8 @@ class LeaveTypeTemplate(BaseModel):
     stops_at_balance: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default="false"
     )
+    # Unused days carried into the next leave year, up to this many; NULL = none.
+    carry_forward_days: Mapped[Decimal | None] = mapped_column(Numeric(4, 1), nullable=True)
     color_key: Mapped[str] = mapped_column(String(20), nullable=False, default="swatch-1")
 
     def __repr__(self) -> str:
