@@ -31,18 +31,18 @@
 The fastest path — no clone, no build. Needs only **Docker (running)** and **Node.js 18+**:
 
 ```bash
-npx bodhiorchard init     # detect ports, generate secrets, pull prebuilt images
-cd bodhiorchard
-npx bodhiorchard start    # start the stack and open the setup wizard
+npx glideship init     # detect ports, generate secrets, pull prebuilt images
+cd glideship
+npx glideship start    # start the stack and open the setup wizard
 ```
 
-The wizard opens at **http://localhost:3000/setup** — finish there (organization, admin account, AI provider, repositories). `bodhiorchard stop` brings it down; your data volumes persist.
+The wizard opens at **http://localhost:3000/setup** — finish there (organization, admin account, AI provider, repositories). `glideship stop` brings it down; your data volumes persist.
 
 Prefer to build from source?
 
 ```bash
-git clone https://github.com/mickyarun/bodhiorchard.git
-cd bodhiorchard
+git clone https://github.com/mickyarun/glideship.git
+cd glideship
 docker compose up
 ```
 
@@ -52,7 +52,7 @@ Already running `claude` on your laptop? **Hybrid mode** reuses your Claude Pro/
 npm install && npm run setup && npm run dev
 ```
 
-→ All three paths, the full `bodhiorchard` CLI command list, prerequisites, mode-switching, and a ready-made demo dataset: **[Deployment Guide](docs/deployment.md)**
+→ All three paths, the full `glideship` CLI command list, prerequisites, mode-switching, and a ready-made demo dataset: **[Deployment Guide](docs/deployment.md)**
 
 ## Why Bodhiorchard
 
@@ -101,7 +101,7 @@ The gamification layer rebuilds developer skill profiles nightly — skills comp
 
 | | | | |
 |---|---|---|---|
-| ![Developer skill profile — rebuilt nightly](docs/images/skills-ui.webp) | ![Ship quality, earn XP, grow your tree](docs/images/gamification-ui.webp) | ![Leaderboard ranked by shipped value](docs/images/LeaderBoard-ui.webp) | ![Unlocks — do the work, unlock the world](docs/images/unlocks-ui.webp) |
+| ![Developer skill profile — rebuilt nightly](docs/images/skills-ui.webp) | ![Ship quality, earn XP, level up](docs/images/gamification-ui.webp) | ![Leaderboard ranked by shipped value](docs/images/LeaderBoard-ui.webp) | ![Unlocks — do the work, unlock the world](docs/images/unlocks-ui.webp) |
 
 And yes — your codebase is a living orchard. Repos as trees, features as fruit, your team walking the garden:
 
@@ -125,9 +125,9 @@ The rest of the company can use Bodhiorchard too. HR and Sales staff get a Peopl
 - **Team calendar and a daily Slack post.** One calendar for who is out and who is at home. A short post every working morning lists names only, never the leave type or reason, and nobody on leave is @mentioned.
 - **Employee records.** Work and personal details, bank and ID numbers, and documents. Sensitive fields and files are encrypted with AES-256-GCM under a separate HR key. Bank and ID numbers stay masked until someone reveals them, every reveal and download is logged, and each employee can see who opened their records.
 
-| Leave home — balances and loss of pay | Request dialog — days counted before you send |
+| Leave home — balances per leave type | Request dialog — days counted before you send |
 |---|---|
-| ![Leave home with balances per leave type and a loss-of-pay card](docs/images/people-leave-home-ui.webp) | ![Request dialog showing working days and a loss-of-pay warning](docs/images/people-request-dialog-ui.webp) |
+| ![Leave home with balances per leave type](docs/images/people-leave-home-ui.webp) | ![Request dialog counting working days and the balance left after the request](docs/images/people-request-dialog-ui.webp) |
 
 | Approvals — balance and overlaps on every card | Team calendar — leave, WFH and holidays |
 |---|---|
@@ -268,7 +268,7 @@ if it isn't running, re-scans fall back to a direct scan.
 
 ## Roadmap
 
-- **Shipped** — core platform (auth, multi-tenant, RBAC), BUD lifecycle, feature registry with vector search, repo scanning + code intelligence, skill profiling, 3D Living Tree, Slack-native triage **and real-time Slack bot conversations**, **GitHub webhook pipeline** (PR-merge → BUD status + repo re-scan), **automated test-plan generation from BUDs** (unit / integration / e2e / security / UAT), **CI/CD integration** (QA-automation repo wired via MCP; test commits flow back to the BUD), MCP server, 12 agent definitions, `npx bodhiorchard` installer, **People workspace** (leave and WFH with Slack approvals, holidays per location, offices and remote work, loss of pay, encrypted employee records)
+- **Shipped** — core platform (auth, multi-tenant, RBAC), BUD lifecycle, feature registry with vector search, repo scanning + code intelligence, skill profiling, 3D Living Tree, Slack-native triage **and real-time Slack bot conversations**, **GitHub webhook pipeline** (PR-merge → BUD status + repo re-scan), **automated test-plan generation from BUDs** (unit / integration / e2e / security / UAT), **CI/CD integration** (QA-automation repo wired via MCP; test commits flow back to the BUD), MCP server, 12 agent definitions, `npx glideship` installer, **People workspace** (leave and WFH with Slack approvals, holidays per location, offices and remote work, loss of pay, encrypted employee records)
 - **Next** — autonomous agent execution engine: small, low-risk BUDs run tech spec → code → review → test end to end, with a human approval gate before release (deliberately not lights-out)
 - **Future** — multi-org marketplace, custom agent builder, analytics dashboards, mobile companion, plugin ecosystem
 
