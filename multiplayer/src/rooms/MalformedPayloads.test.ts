@@ -102,7 +102,7 @@ describe("OrgRoom messages without a payload", () => {
 describe("HouseRoom messages", () => {
   function houseWithVisitor(): { room: HouseRoom; visitor: PlayerState } {
     const room = new HouseRoom()
-    room.onCreate({ ownerId: "alice" })
+    room.onCreate({ orgId: ORG_ID, ownerId: "alice" })
     const visitor = new PlayerState()
     visitor.x = 2
     room.state.players.set("s-bob", visitor)

@@ -22,7 +22,8 @@
 import type { Client, Room } from "colyseus"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { MinigameRoom } from "./MinigameRoom"
-import { RaceRoom } from "./RaceRoom"
+import type { RaceRoom } from "./RaceRoom"
+import { createRaceRoom } from "../testing/raceRoom"
 
 const TICK_STEP_MS = 100
 let errorSpy: ReturnType<typeof vi.spyOn>
@@ -64,15 +65,13 @@ afterEach(() => {
 
 describe("RaceRoom simulation loop", () => {
   function runningRace(): RaceRoom {
-    const room = new RaceRoom()
-    room.onCreate({ orgId: "org-a", hostUserId: "alice", hostName: "Alice", distanceM: 100 })
+    const room = createRaceRoom({ hostUserId: "alice", hostName: "Alice" })
     ;(room as unknown as { beginRunning(): void }).beginRunning()
     return room
   }
 
   it("schedules the sim tick on the room clock", () => {
-    const room = new RaceRoom()
-    room.onCreate({ orgId: "org-a", hostUserId: "alice", hostName: "Alice", distanceM: 100 })
+    const room = createRaceRoom({ hostUserId: "alice", hostName: "Alice" })
     const before = activeClockTimers(room)
 
     ;(room as unknown as { beginRunning(): void }).beginRunning()
