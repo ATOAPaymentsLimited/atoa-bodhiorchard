@@ -768,7 +768,7 @@ export interface BUDReleaseStage {
 
 // ── Bug Types ────────────────────────────────────────────────────
 export type BugSeverity = 'low' | 'medium' | 'high' | 'critical'
-export type BugStatusValue = 'open' | 'in-progress' | 'resolved' | 'closed' | 'blocked'
+export type BugStatusValue = 'open' | 'in-progress' | 'resolved' | 'closed' | 'blocked' | 'rejected'
 export type BugType = 'testing' | 'production'
 
 export interface BugListItem {
@@ -875,13 +875,15 @@ export interface BugCommentListResponse {
   total: number
 }
 
-// Order matches the production Kanban left-to-right.
+// Every bug status, in lifecycle order. ``rejected`` marks a false
+// positive (the backend docks the reporter's SP for it).
 export const BUG_BOARD_COLUMNS: BugStatusValue[] = [
   'open',
   'in-progress',
   'blocked',
   'resolved',
   'closed',
+  'rejected',
 ]
 
 export const BUG_STATUS_LABELS: Record<BugStatusValue, string> = {
@@ -890,13 +892,15 @@ export const BUG_STATUS_LABELS: Record<BugStatusValue, string> = {
   blocked: 'Blocked',
   resolved: 'Resolved',
   closed: 'Closed',
+  rejected: 'Rejected',
 }
 
+// Severity shares the priority scale (theme colours ``priority-p0``…``p3``).
 export const BUG_SEVERITY_COLORS: Record<BugSeverity, string> = {
-  low: 'grey',
-  medium: 'warning',
-  high: 'orange',
-  critical: 'error',
+  low: 'priority-p3',
+  medium: 'priority-p2',
+  high: 'priority-p1',
+  critical: 'priority-p0',
 }
 
 export const BUG_STATUS_COLORS: Record<BugStatusValue, string> = {
@@ -905,23 +909,40 @@ export const BUG_STATUS_COLORS: Record<BugStatusValue, string> = {
   resolved: 'success',
   closed: 'muted', // theme token, not raw Material grey
   blocked: 'info', // theme token, not raw Material purple
+  rejected: 'muted',
 }
 
-// Lifecycle colours grouped by stage-type rather than ten clashing Material
-// hues — keeps the kanban on the forest design system and tells the
-// plan → build → validate → ship story at a glance. All values are theme
-// tokens (see assets/styles/tokens.css), so they track light/dark.
+// One hue per lifecycle stage (theme colours ``stage-*``, defined in
+// tokens.css and the Vuetify themes), so the board, the dashboard flow bar
+// and every status chip read the same way in light and dark.
 export const BUD_STATUS_COLORS: Record<BUDStatus, string> = {
-  'bud': 'muted', // seed / backlog — not started
-  'design': 'info', // plan
-  'tech_arch': 'info', // plan
-  'development': 'primary', // build
-  'code_review': 'primary', // build
-  'testing': 'warning', // validate
-  'uat': 'warning', // validate
-  'prod': 'success', // shipped
-  'closed': 'muted', // archived
-  'discarded': 'error', // killed
+  'bud': 'stage-bud',
+  'design': 'stage-design',
+  'tech_arch': 'stage-tech-arch',
+  'development': 'stage-development',
+  'code_review': 'stage-code-review',
+  'testing': 'stage-testing',
+  'uat': 'stage-uat',
+  'prod': 'stage-prod',
+  'closed': 'muted',
+  'discarded': 'error',
+}
+
+// Priority chip colours (theme colours ``priority-*``). Used with the tonal
+// chip variant: the hue is the text, a wash of it is the fill.
+export const BUD_PRIORITY_COLORS: Record<BUDPriority, string> = {
+  P0: 'priority-p0',
+  P1: 'priority-p1',
+  P2: 'priority-p2',
+  P3: 'priority-p3',
+}
+
+/** Sort weight for priorities: P0 first. */
+export const BUD_PRIORITY_WEIGHTS: Record<BUDPriority, number> = { P0: 0, P1: 1, P2: 2, P3: 3 }
+
+/** Display reference for a BUD number, e.g. 8 → "BUD-008". */
+export function budRef(budNumber: number): string {
+  return `BUD-${String(budNumber).padStart(3, '0')}`
 }
 
 // ── Job Queue Types ───────────────────────────────────────────────
