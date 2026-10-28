@@ -30,11 +30,14 @@
         </v-btn>
       </div>
 
-      <v-alert v-if="dsStore.error" type="error" variant="tonal" class="mt-4" closable>
+      <AppCallout v-if="dsStore.error" variant="error" class="mt-4">
         {{ dsStore.error }}
-      </v-alert>
+        <template #actions>
+          <v-btn icon="mdi-close" variant="text" size="small" aria-label="Dismiss" @click="dsStore.error = null" />
+        </template>
+      </AppCallout>
 
-      <v-alert v-if="extracting || jobActive" type="info" variant="tonal" class="mt-4">
+      <AppCallout v-if="extracting || jobActive" variant="info" class="mt-4">
         <div class="d-flex align-center ga-3">
           <v-progress-circular indeterminate size="18" width="2" color="info" />
           <span>{{ extractProgress || 'Extracting design system...' }}</span>
@@ -45,7 +48,7 @@
             ({{ jobStatus.progressPct }}%)
           </span>
         </div>
-      </v-alert>
+      </AppCallout>
     </div>
 
     <!-- Content -->
@@ -263,6 +266,7 @@
 </template>
 
 <script setup lang="ts">
+import AppCallout from '@/components/common/AppCallout.vue'
 import { ref, computed, onMounted } from 'vue'
 import { useDesignSystemStore, type DesignSystemItem } from '@/stores/designSystem'
 import { useSettingsStore } from '@/stores/settings'

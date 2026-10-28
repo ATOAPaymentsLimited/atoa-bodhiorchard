@@ -38,20 +38,14 @@
 
       <div class="pa-5">
         <div class="text-caption text-medium-emphasis mb-4">
-          Bodhiorchard ties BUDs to branches: features merge from develop,
+          Glideship ties BUDs to branches: features merge from develop,
           stage-progress reads main, and (optionally) UAT promotion follows
           a third branch or pattern.
         </div>
 
-        <v-alert
-          v-if="branches.error.value"
-          type="error"
-          variant="tonal"
-          density="compact"
-          class="mb-4"
-        >
+        <AppCallout v-if="branches.error.value" variant="error" class="mb-4">
           {{ branches.error.value }}
-        </v-alert>
+        </AppCallout>
 
         <div v-if="branches.loading.value" class="d-flex justify-center py-6">
           <v-progress-circular indeterminate color="primary" size="32" />
@@ -122,6 +116,7 @@
 </template>
 
 <script setup lang="ts">
+import AppCallout from '@/components/common/AppCallout.vue'
 import { computed } from 'vue'
 import { useSettingsStore } from '@/stores/settings'
 import type { useRepoBranches } from '@/composables/useRepoBranches'

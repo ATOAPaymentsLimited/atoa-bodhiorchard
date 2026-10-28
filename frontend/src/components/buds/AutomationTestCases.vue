@@ -31,7 +31,7 @@
             <div class="d-flex align-center ga-2 flex-grow-1">
               <v-chip
                 size="x-small"
-                :color="priorityColor[tc.priority] || 'grey'"
+                :color="priorityColor[tc.priority] || 'muted'"
                 variant="tonal"
               >
                 {{ tc.priority }}
@@ -82,6 +82,7 @@
 </template>
 
 <script setup lang="ts">
+import { copyText } from '@/utils/clipboard'
 import { computed } from 'vue'
 import type { AutomationTestCase } from '@/types'
 
@@ -100,7 +101,7 @@ const priorityColor: Record<string, string> = {
   critical: 'error',
   high: 'warning',
   medium: 'info',
-  low: 'grey',
+  low: 'muted',
 }
 
 const groupedCases = computed(() => {
@@ -114,6 +115,6 @@ const groupedCases = computed(() => {
 })
 
 function copyToClipboard(text: string): void {
-  navigator.clipboard.writeText(text)
+  void copyText(text)
 }
 </script>

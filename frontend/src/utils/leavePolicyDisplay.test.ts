@@ -141,12 +141,12 @@ describe('leave types', () => {
 
   it('names every swatch', () => {
     expect(SWATCH_OPTIONS.map(s => s.name)).toEqual([
-      'Green',
-      'Blue',
-      'Amber',
-      'Red',
-      'Gold',
       'Teal',
+      'Violet',
+      'Orange',
+      'Pink',
+      'Fuchsia',
+      'Brown',
       'Grey',
     ])
   })

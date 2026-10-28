@@ -26,6 +26,7 @@ import {
   lopLabel,
   meterPercents,
   requestTypeLabel,
+  requestLength,
   swatchColor,
   toNumber,
   toNumberOrNull,
@@ -148,9 +149,10 @@ describe('labels', () => {
     expect(codeFromName('  ')).toBe('')
   })
 
-  it('falls back to primary for unknown swatches', () => {
-    expect(swatchColor('swatch-2')).toBe('info')
-    expect(swatchColor('nope')).toBe('primary')
+  it('maps swatch keys onto their theme colours, unknown ones to the first', () => {
+    expect(swatchColor('swatch-2')).toBe('swatch-2')
+    expect(swatchColor('nope')).toBe('swatch-1')
+    expect(swatchColor(null)).toBe('swatch-1')
   })
 })
 
@@ -193,5 +195,14 @@ describe('lopLabel', () => {
     expect(lopLabel(1)).toBe('1 day loss of pay')
     expect(lopLabel('0')).toBe('')
     expect(lopLabel(null)).toBe('')
+  })
+})
+
+describe('requestLength', () => {
+  it('says the days, or which half of the day', () => {
+    expect(requestLength({ days: '3', half_day: 'none' })).toBe('3 days')
+    expect(requestLength({ days: 1, half_day: 'none' })).toBe('1 day')
+    expect(requestLength({ days: '0.5', half_day: 'first_half' })).toBe('Half day, morning')
+    expect(requestLength({ days: '0.5', half_day: 'second_half' })).toBe('Half day, afternoon')
   })
 })
