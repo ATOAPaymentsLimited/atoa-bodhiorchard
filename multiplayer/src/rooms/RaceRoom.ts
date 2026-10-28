@@ -68,6 +68,7 @@ import { driveBots } from "./RaceBotDriver"
 import { raceIdentityFrom, raceIdentityOf, type RaceJoinOptions } from "./RaceRoomAuth"
 import { postRaceInvite, postRaceResults } from "../bridge/BackendClient"
 import { fireRaceDispose, fireRacePhase } from "../bridge/RaceRegistry"
+import { safeLog } from "../bridge/logSanitize"
 import { consumeRaceCreateTicket } from "../bridge/RaceCreateTickets"
 import { verifyJoin, type JoinIdentity } from "../auth/verifyJoin"
 
@@ -115,7 +116,7 @@ export class RaceRoom extends Room<{ state: RaceRoomState }> {
     if (identity.userId === this.state.hostUserId) this.state.hostName = identity.name
     client.userData = identity
     console.log(
-      `[RaceRoom ${this.roomId}] ${identity?.name ?? "anonymous"} (${client.sessionId}) joined`,
+      `[RaceRoom ${this.roomId}] ${safeLog(identity.name)} (${client.sessionId}) joined`,
     )
   }
 
@@ -277,7 +278,7 @@ export class RaceRoom extends Room<{ state: RaceRoomState }> {
     const opener = (client.userData as { userId?: string } | undefined)?.userId
     if (opener !== this.state.hostUserId) return
     console.log(
-      `[RaceRoom ${this.roomId}] host ${this.state.hostName} cancelled the race in ${this.state.phase} phase`,
+      `[RaceRoom ${this.roomId}] host ${safeLog(this.state.hostName)} cancelled the race in ${this.state.phase} phase`,
     )
     this.broadcast("race_cancelled", { hostName: this.state.hostName })
     // Allow normal autoDispose to clean up — disconnect terminates every
@@ -344,7 +345,7 @@ export class RaceRoom extends Room<{ state: RaceRoomState }> {
     )
 
     console.log(
-      `[RaceRoom ${this.roomId}] +${additions.length} invitees: ${additions.join(", ")}`,
+      `[RaceRoom ${this.roomId}] +${additions.length} invitees: ${additions.map(safeLog).join(", ")}`,
     )
   }
 
@@ -429,7 +430,7 @@ export class RaceRoom extends Room<{ state: RaceRoomState }> {
     }
 
     console.log(
-      `[RaceRoom ${this.roomId}] invitee declined ${userId} — ` +
+      `[RaceRoom ${this.roomId}] invitee declined ${safeLog(userId)} — ` +
         `invitedUserIds=${this.state.invitedUserIds.length} ` +
         `racers=${this.state.racers.size}`,
     )

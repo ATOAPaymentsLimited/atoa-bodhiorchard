@@ -46,6 +46,7 @@ import {
 } from "../auth/verifyJoin"
 import { requireRoomKey } from "./roomKeys"
 import { isCoffeeDrink } from "../sim/CoffeeMenu"
+import { safeLog } from "../bridge/logSanitize"
 import {
   advancePhase,
   acknowledgeDispense,
@@ -170,7 +171,7 @@ export class CoffeeBarRoom extends Room<{ state: CoffeeBarState }> {
     player.connected = true
     this.state.players.set(client.sessionId, player)
     this.sessionByUserId.set(player.userId, client.sessionId)
-    console.log(`[CoffeeBarRoom] ${player.name} (${client.sessionId}) joined`)
+    console.log(`[CoffeeBarRoom] ${safeLog(player.name)} (${client.sessionId}) joined`)
   }
 
   onLeave(client: Client) {

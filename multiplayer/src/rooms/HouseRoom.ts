@@ -26,6 +26,7 @@ import { Room, Client, type RoomException, type RoomMethodName } from "colyseus"
 import { reportRoomException } from "./roomExceptions"
 import { Schema, MapSchema, type } from "@colyseus/schema"
 import { PlayerState } from "../schema/PlayerState"
+import { safeLog } from "../bridge/logSanitize"
 import {
   requireJoinIdentity,
   verifyJoin,
@@ -93,8 +94,8 @@ export class HouseRoom extends Room<{ state: HouseRoomState }> {
   }
 
   onJoin(client: Client, options: HouseJoinOptions, auth?: JoinIdentity) {
-    console.log(`[HouseRoom] ${options.name} (${client.sessionId}) joined`)
     const identity = requireJoinIdentity(auth)
+    console.log(`[HouseRoom] ${safeLog(identity.name)} (${client.sessionId}) joined`)
     const player = new PlayerState()
     player.userId = identity.userId
     player.name = identity.name
@@ -105,7 +106,7 @@ export class HouseRoom extends Room<{ state: HouseRoomState }> {
 
   onLeave(client: Client) {
     const player = this.state.players.get(client.sessionId)
-    console.log(`[HouseRoom] ${player?.name || client.sessionId} left`)
+    console.log(`[HouseRoom] ${safeLog(player?.name || client.sessionId)} left`)
     this.state.players.delete(client.sessionId)
   }
 

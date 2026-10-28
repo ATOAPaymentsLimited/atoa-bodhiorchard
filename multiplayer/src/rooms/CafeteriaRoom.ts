@@ -46,6 +46,7 @@ import {
 } from "../auth/verifyJoin"
 import { requireRoomKey } from "./roomKeys"
 import { isCafeteriaMeal } from "../sim/CafeteriaMenu"
+import { safeLog } from "../bridge/logSanitize"
 import {
   advancePhase,
   acknowledgeDispense,
@@ -152,7 +153,7 @@ export class CafeteriaRoom extends Room<{ state: CafeteriaState }> {
     player.connected = true
     this.state.players.set(client.sessionId, player)
     this.sessionByUserId.set(player.userId, client.sessionId)
-    console.log(`[CafeteriaRoom] ${player.name} (${client.sessionId}) joined`)
+    console.log(`[CafeteriaRoom] ${safeLog(player.name)} (${client.sessionId}) joined`)
   }
 
   onLeave(client: Client) {

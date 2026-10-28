@@ -190,7 +190,7 @@ export class OrgRoom extends Room<{ state: OrgRoomState }> {
   async onCreate(options: OrgRoomCreateOptions) {
     this.setState(new OrgRoomState())
     this.state.orgId = options.orgId ?? ""
-    console.log(`[OrgRoom] Created org=${this.state.orgId}`)
+    console.log(`[OrgRoom] Created org=${safeLog(this.state.orgId)}`)
 
     this.onMessage("move", (client, data: MoveMessage) => this.handleMove(client, data))
     this.onMessage("takeover_start", (client, data: TakeoverMessage) => this.handleTakeoverStart(client, data))
@@ -292,10 +292,10 @@ export class OrgRoom extends Room<{ state: OrgRoomState }> {
       if (snapshot) {
         this.loadSnapshot(snapshot)
       } else {
-        console.warn(`[OrgRoom] No snapshot available for org=${this.state.orgId}`)
+        console.warn(`[OrgRoom] No snapshot available for org=${safeLog(this.state.orgId)}`)
       }
     } catch (err) {
-      console.error(`[OrgRoom] Snapshot load failed for org=${this.state.orgId}:`, err)
+      console.error("[OrgRoom] Snapshot load failed for org=%s:", safeLog(this.state.orgId), err)
     }
   }
 
@@ -317,14 +317,15 @@ export class OrgRoom extends Room<{ state: OrgRoomState }> {
       if (!snapshot) {
         console.warn(
           `[OrgRoom] presence-config refresh got null snapshot for ` +
-            `org=${this.state.orgId} — keeping existing config`,
+            `org=${safeLog(this.state.orgId)} — keeping existing config`,
         )
         return
       }
       this.inferredSim.setConfig(buildPresenceConfig(snapshot.presenceSettings))
     } catch (err) {
       console.warn(
-        `[OrgRoom] presence-config refresh failed for org=${this.state.orgId}:`,
+        "[OrgRoom] presence-config refresh failed for org=%s:",
+        safeLog(this.state.orgId),
         err,
       )
     }
@@ -373,7 +374,7 @@ export class OrgRoom extends Room<{ state: OrgRoomState }> {
 
   onLeave(client: Client) {
     const name = (client.userData as { name?: string } | undefined)?.name ?? client.sessionId
-    console.log(`[OrgRoom] ${name} left org=${this.state.orgId}`)
+    console.log(`[OrgRoom] ${safeLog(name)} left org=${safeLog(this.state.orgId)}`)
 
     // If this client was controlling a member via takeover, release the
     // takeover lock AND start a walk-home so the character doesn't strand
@@ -415,7 +416,7 @@ export class OrgRoom extends Room<{ state: OrgRoomState }> {
     )
     this.devSim.walkHome(member, home.x, home.y, home.z, home.yaw, home.sitting, home.locationContext)
     console.log(
-      `[OrgRoom] ${name} disconnect (${wasInInterior ? "in-interior" : "takeover"}) → walking home to ${home.locationContext}`,
+      `[OrgRoom] ${safeLog(name)} disconnect (${wasInInterior ? "in-interior" : "takeover"}) → walking home to ${home.locationContext}`,
     )
   }
 
@@ -425,7 +426,7 @@ export class OrgRoom extends Room<{ state: OrgRoomState }> {
   }
 
   onDispose() {
-    console.log(`[OrgRoom] Disposed org=${this.state.orgId}`)
+    console.log(`[OrgRoom] Disposed org=${safeLog(this.state.orgId)}`)
     if (this.state.orgId) {
       unregisterOrgRoom(this.state.orgId)
     }
@@ -441,7 +442,7 @@ export class OrgRoom extends Room<{ state: OrgRoomState }> {
     if (type === "dev_activity") {
       const event = parseDevActivityEvent(data)
       if (!event) {
-        console.warn(`[OrgRoom] Malformed dev_activity payload org=${this.state.orgId}`)
+        console.warn(`[OrgRoom] Malformed dev_activity payload org=${safeLog(this.state.orgId)}`)
         return
       }
       this.devSim.handleEvent(this.state.members, event)
@@ -456,7 +457,7 @@ export class OrgRoom extends Room<{ state: OrgRoomState }> {
     if (type === "agent_activity") {
       const event = parseAgentActivityEvent(data)
       if (!event) {
-        console.warn(`[OrgRoom] Malformed agent_activity payload org=${this.state.orgId}`)
+        console.warn(`[OrgRoom] Malformed agent_activity payload org=${safeLog(this.state.orgId)}`)
         return
       }
       this.agentSim.handleEvent(this.state.agents, event)
@@ -465,13 +466,13 @@ export class OrgRoom extends Room<{ state: OrgRoomState }> {
     if (type === "member_presence") {
       const event = parseMemberPresenceEvent(data)
       if (!event) {
-        console.warn(`[OrgRoom] Malformed member_presence payload org=${this.state.orgId}`)
+        console.warn(`[OrgRoom] Malformed member_presence payload org=${safeLog(this.state.orgId)}`)
         return
       }
       this.applyPresenceChange(event.user_id, event.presence)
       return
     }
-    console.log(`[OrgRoom] Bridge event type=${type} (unhandled) org=${this.state.orgId}`)
+    console.log(`[OrgRoom] Bridge event type=${safeLog(type)} (unhandled) org=${safeLog(this.state.orgId)}`)
   }
 
   // ─── Snapshot loading ────────────────────────
@@ -542,7 +543,7 @@ export class OrgRoom extends Room<{ state: OrgRoomState }> {
     const currentScale = getActiveScale()
     if (currentScale.orchardRadius !== desiredScale.orchardRadius) {
       console.warn(
-        `[OrgRoom] default-key scale clobber org=${this.state.orgId} ` +
+        `[OrgRoom] default-key scale clobber org=${safeLog(this.state.orgId)} ` +
         `currentR=${currentScale.orchardRadius} desiredR=${desiredScale.orchardRadius} ` +
         `— another OrgRoom likely raced this snapshot load. Phase 3 fix needed for multi-org-per-process.`,
       )
@@ -592,7 +593,7 @@ export class OrgRoom extends Room<{ state: OrgRoomState }> {
       this.state.members.set(m.user_id, member)
     })
 
-    console.log(`[OrgRoom] Snapshot loaded org=${this.state.orgId} members=${sorted.length}`)
+    console.log(`[OrgRoom] Snapshot loaded org=${safeLog(this.state.orgId)} members=${sorted.length}`)
   }
 
   // ─── Placement helpers ───────────────────────
@@ -756,7 +757,7 @@ export class OrgRoom extends Room<{ state: OrgRoomState }> {
     member.locationContext = home.locationContext
     this.devSim.walkHome(member, home.x, home.y, home.z, home.yaw, home.sitting, home.locationContext)
     console.log(
-      `[OrgRoom] ${member.name} presence → ${newPresence}, walking to ${home.locationContext}`,
+      `[OrgRoom] ${safeLog(member.name)} presence → ${safeLog(newPresence)}, walking to ${home.locationContext}`,
     )
   }
 
@@ -848,7 +849,7 @@ export class OrgRoom extends Room<{ state: OrgRoomState }> {
     // seeing a ghost of the owner at their desk while the owner is WASD-ing).
     member.locationContext = "garden"
     member.takeoverSessionId = client.sessionId
-    console.log(`[OrgRoom] ${member.name} takeover START by ${client.sessionId}`)
+    console.log(`[OrgRoom] ${safeLog(member.name)} takeover START by ${client.sessionId}`)
   }
 
   private handleTakeoverEnd(client: Client, data: TakeoverMessage): void {
@@ -875,7 +876,7 @@ export class OrgRoom extends Room<{ state: OrgRoomState }> {
       member.animState = "idle"
       member.locationContext = data.location
       console.log(
-        `[OrgRoom] ${member.name} takeover END → entering ${data.location} (avatar hidden)`,
+        `[OrgRoom] ${safeLog(member.name)} takeover END → entering ${data.location} (avatar hidden)`,
       )
       return
     }
@@ -891,7 +892,7 @@ export class OrgRoom extends Room<{ state: OrgRoomState }> {
     )
     this.devSim.walkHome(member, home.x, home.y, home.z, home.yaw, home.sitting, home.locationContext)
     console.log(
-      `[OrgRoom] ${member.name} takeover END → walking home to ${home.locationContext}`,
+      `[OrgRoom] ${safeLog(member.name)} takeover END → walking home to ${home.locationContext}`,
     )
   }
 
