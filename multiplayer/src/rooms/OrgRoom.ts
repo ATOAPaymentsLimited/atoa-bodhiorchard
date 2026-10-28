@@ -54,16 +54,14 @@ import {
 import { AgentActivitySim, parseAgentActivityEvent } from "../sim/AgentActivitySim"
 import { InferredPresenceSim, buildPresenceConfig } from "../sim/InferredPresenceSim"
 import { fetchOrgSnapshot, type OrgSnapshotResponse } from "../bridge/BackendClient"
-import {
-  requireJoinIdentity,
-  verifyJoin,
-  type JoinCredentials,
-  type JoinIdentity,
-} from "../auth/verifyJoin"
-import { safeLog } from "../bridge/logSanitize"
-import { registerOrgRoom, unregisterOrgRoom } from "../bridge/BridgeEndpoint"
+import type { JoinCredentials, JoinIdentity } from "../auth/verifyJoin"
+import { authenticateJoin, requireRoomIdentity } from "../auth/roomAuth"
+import { safeError, safeLog } from "../bridge/logSanitize"
+import { unregisterOrgRoom } from "../bridge/BridgeEndpoint"
+import { isUuid } from "../bridge/uuid"
 import { installRaceCreateHandler } from "./OrgRaceHandler"
 import { installBacklashCreateHandler } from "./OrgBacklashHandler"
+import { claimOrgRoomSlot } from "./orgRoomSlot"
 
 // Server simulation tick rate — 20Hz matches Colyseus default state sync cadence
 const SIM_TICK_MS = 50
@@ -133,6 +131,9 @@ interface VehicleMountMessage {
 export class OrgRoom extends Room<{ state: OrgRoomState }> {
   maxClients = 100
 
+  /** Verify every join before matchmaking reserves a seat (see auth/roomAuth). */
+  static onAuth = authenticateJoin
+
   // Repo tree positions from snapshot — used by DevActivitySim
   repoPositions = new Map<string, { x: number; z: number }>()
 
@@ -188,8 +189,12 @@ export class OrgRoom extends Room<{ state: OrgRoomState }> {
   private static readonly VALID_VEHICLES = ["horse"]
 
   async onCreate(options: OrgRoomCreateOptions) {
+    // Only a well-formed org id may key the bridge registry or reach the
+    // snapshot URL.
+    const orgId = options.orgId
+    if (!isUuid(orgId)) throw new Error("OrgRoom.onCreate: orgId must be a UUID")
     this.setState(new OrgRoomState())
-    this.state.orgId = options.orgId ?? ""
+    this.state.orgId = orgId
     console.log(`[OrgRoom] Created org=${safeLog(this.state.orgId)}`)
 
     this.onMessage("move", (client, data: MoveMessage) => this.handleMove(client, data))
@@ -274,8 +279,16 @@ export class OrgRoom extends Room<{ state: OrgRoomState }> {
       }
     }, INFERRED_PRESENCE_TICK_MS)
 
+    // Claim the org's bridge slot last, so nothing after it can throw and
+    // leave the slot held by a room that never opened. A second room for an
+    // org that already has one (a direct `create`, or a `joinOrCreate` that
+    // found the open room full) is refused rather than taking the bridge
+    // from the open room (see orgRoomSlot). Colyseus still disposes a
+    // refused room, which clears its timers.
+    claimOrgRoomSlot(orgId, this)
+
     // Kick off snapshot load and expose a promise so onJoin can wait for it.
-    // onCreate MUST NOT throw — the room stays usable (empty state) on failure.
+    // A failed load must not throw: the room stays usable with empty state.
     this.snapshotReady = this.loadInitialSnapshot()
   }
 
@@ -285,8 +298,6 @@ export class OrgRoom extends Room<{ state: OrgRoomState }> {
    * and resolves cleanly so onJoin can `await` it without risk of rejection.
    */
   private async loadInitialSnapshot(): Promise<void> {
-    if (!this.state.orgId) return
-    registerOrgRoom(this.state.orgId, this)
     try {
       const snapshot = await fetchOrgSnapshot(this.state.orgId)
       if (snapshot) {
@@ -295,7 +306,11 @@ export class OrgRoom extends Room<{ state: OrgRoomState }> {
         console.warn(`[OrgRoom] No snapshot available for org=${safeLog(this.state.orgId)}`)
       }
     } catch (err) {
-      console.error("[OrgRoom] Snapshot load failed for org=%s:", safeLog(this.state.orgId), err)
+      console.error(
+        "[OrgRoom] Snapshot load failed for org=%s: %s",
+        safeLog(this.state.orgId),
+        safeError(err),
+      )
     }
   }
 
@@ -324,26 +339,19 @@ export class OrgRoom extends Room<{ state: OrgRoomState }> {
       this.inferredSim.setConfig(buildPresenceConfig(snapshot.presenceSettings))
     } catch (err) {
       console.warn(
-        "[OrgRoom] presence-config refresh failed for org=%s:",
+        "[OrgRoom] presence-config refresh failed for org=%s: %s",
         safeLog(this.state.orgId),
-        err,
+        safeError(err),
       )
     }
   }
 
-  /**
-   * Verify the client's JWT against the backend before allowing them to join.
-   * The identity `verifyJoin` returns (the token's user, in this room's org)
-   * is the only one onJoin uses; client-supplied `userId` / `name` are ignored.
-   */
-  async onAuth(_client: Client, options: OrgRoomJoinOptions): Promise<JoinIdentity> {
-    return verifyJoin(options, this.state.orgId)
-  }
-
   async onJoin(client: Client, options: OrgRoomJoinOptions, auth?: JoinIdentity) {
     // Colyseus passes the raw client join options as `options` and the value
-    // returned by onAuth as `auth`. Only `auth` carries the verified identity.
-    const identity = requireJoinIdentity(auth)
+    // the static onAuth returned as `auth`: the token's user, in the org the
+    // client named. Only `auth` carries the verified identity, and only if
+    // that org is this room's; client-supplied `userId` / `name` are ignored.
+    const identity = requireRoomIdentity(auth, this.state.orgId)
     // Wait for the initial snapshot before deciding if the joining user is
     // a known member — prevents a race where the first client races against
     // onCreate's async fetch and sees an empty members map.
@@ -426,9 +434,13 @@ export class OrgRoom extends Room<{ state: OrgRoomState }> {
   }
 
   onDispose() {
-    console.log(`[OrgRoom] Disposed org=${safeLog(this.state.orgId)}`)
-    if (this.state.orgId) {
-      unregisterOrgRoom(this.state.orgId)
+    // A room refused in onCreate is still disposed, possibly before it had
+    // any state; a throw here would skip the timer cleanup Colyseus runs
+    // after this hook.
+    const orgId = this.state?.orgId
+    console.log(`[OrgRoom] Disposed org=${safeLog(orgId)}`)
+    if (orgId) {
+      unregisterOrgRoom(orgId, this)
     }
   }
 

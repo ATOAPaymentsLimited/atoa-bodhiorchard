@@ -21,7 +21,7 @@
  *
  * Shared secret authentication via X-Bridge-Secret header.
  */
-import { safeLog } from "./logSanitize"
+import { safeError, safeLog } from "./logSanitize"
 
 const BACKEND_URL = process.env.BACKEND_URL ?? "http://localhost:8000"
 
@@ -119,7 +119,7 @@ async function postBridgeJson<TResponse>(
     }
     return (await response.json()) as TResponse
   } catch (err) {
-    console.warn(`[BackendClient] ${operation} unreachable:`, err)
+    console.warn("[BackendClient] %s unreachable: %s", operation, safeError(err))
     return null
   }
 }
@@ -127,7 +127,8 @@ async function postBridgeJson<TResponse>(
 /** Fetch an org snapshot from the backend. Returns null on failure. */
 export async function fetchOrgSnapshot(orgId: string): Promise<OrgSnapshotResponse | null> {
   try {
-    const url = `${BACKEND_URL}/api/v1/internal/colyseus/org-snapshot/${orgId}`
+    const url =
+      `${BACKEND_URL}/api/v1/internal/colyseus/org-snapshot/${encodeURIComponent(orgId)}`
     const response = await fetch(url, {
       method: "GET",
       headers: {
@@ -143,7 +144,7 @@ export async function fetchOrgSnapshot(orgId: string): Promise<OrgSnapshotRespon
     }
     return (await response.json()) as OrgSnapshotResponse
   } catch (err) {
-    console.warn(`[BackendClient] org-snapshot error:`, err)
+    console.warn("[BackendClient] org-snapshot error: %s", safeError(err))
     return null
   }
 }
@@ -184,7 +185,7 @@ export async function postRaceInvite(payload: RaceInvitePayload): Promise<boolea
     }
     return true
   } catch (err) {
-    console.warn(`[BackendClient] race-invite unreachable:`, err)
+    console.warn("[BackendClient] race-invite unreachable: %s", safeError(err))
     return false
   }
 }
@@ -229,7 +230,7 @@ export async function postRaceResults(payload: RaceResultsPayload): Promise<bool
     }
     return true
   } catch (err) {
-    console.warn(`[BackendClient] race-results unreachable:`, err)
+    console.warn("[BackendClient] race-results unreachable: %s", safeError(err))
     return false
   }
 }
@@ -281,7 +282,7 @@ export async function postMinigameResults(
     }
     return (await response.json()) as MinigameResultsResponse
   } catch (err) {
-    console.warn(`[BackendClient] minigame-results unreachable:`, err)
+    console.warn("[BackendClient] minigame-results unreachable: %s", safeError(err))
     return null
   }
 }
@@ -370,7 +371,7 @@ export async function verifyUserToken(
     }
     return (await response.json()) as TokenVerification
   } catch (err) {
-    console.warn(`[BackendClient] verify-token unreachable (${BACKEND_URL}):`, err)
+    console.warn("[BackendClient] verify-token unreachable (%s): %s", BACKEND_URL, safeError(err))
     return { valid: false, reason: "backend_unreachable" }
   }
 }
