@@ -15,7 +15,7 @@
  -->
 
 <template>
-  <v-card variant="outlined" class="linked-features-panel">
+  <v-card variant="flat" class="linked-features-panel">
     <div class="d-flex align-center px-4 py-2">
       <div class="d-flex align-center text-subtitle-2">
         <span>Linked features</span>
@@ -48,7 +48,7 @@
         v-if="canEdit"
         size="small"
         variant="tonal"
-        color="teal"
+        color="primary"
         prepend-icon="mdi-plus"
         :disabled="store.loading"
         @click="pickerOpen = true"
@@ -81,14 +81,14 @@
         <template #default>
           <div class="d-flex align-center flex-wrap ga-2">
             <span class="text-body-2 font-weight-medium">{{ row.title }}</span>
-            <v-chip v-if="row.repoName" size="x-small" variant="tonal" color="grey">
+            <v-chip v-if="row.repoName" size="x-small" variant="tonal" color="muted">
               {{ row.repoName }}
             </v-chip>
             <v-chip
               v-if="row.source !== 'pm_agent'"
               size="x-small"
               variant="tonal"
-              :color="row.source === 'manual' ? 'blue' : 'purple'"
+              :color="row.source === 'manual' ? 'info' : 'brand'"
             >
               {{ row.source === 'manual' ? 'manual' : 'tech-arch' }}
             </v-chip>
@@ -238,6 +238,8 @@ watch(
 <style scoped>
 .linked-features-panel {
   background: rgb(var(--v-theme-surface));
+  border: 1px solid rgb(var(--v-theme-rule));
+  border-radius: var(--radius-card);
 }
 .linked-feature-row :deep(.v-list-item__append) {
   align-self: center;

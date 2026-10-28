@@ -15,7 +15,7 @@
 """Claude Code CLI runner for executing AI tasks locally.
 
 This module provides the interface for triggering Claude Code from the
-Bodhiorchard backend via local subprocess execution.
+Glideship backend via local subprocess execution.
 """
 
 import asyncio
@@ -53,7 +53,7 @@ ProgressCallback = Callable[[str, dict[str, Any]], None]  # (tool_name, tool_inp
 # to a managed, empty scratch dir inside the platform tmp tree (which is
 # on the cwd allowlist). Using a sentinel rather than ``None`` makes the
 # intent explicit at every call site and removes the silent fallback to
-# the FastAPI worker's cwd — in Hybrid mode that cwd is the Bodhiorchard
+# the FastAPI worker's cwd — in Hybrid mode that cwd is the Glideship
 # repo root, which is a confused-deputy waiting to happen if a future
 # git/gh-using caller ever forgets to pass ``working_dir``.
 NO_REPO_CONTEXT: str = "<no-repo-context>"
@@ -95,9 +95,9 @@ class ClaudeRunResult:
 class MCPServerConfig:
     """Configuration for an MCP server to expose to the Claude CLI.
 
-    Generates a stdio-based MCP config that spawns the Bodhiorchard bridge script,
+    Generates a stdio-based MCP config that spawns the Glideship bridge script,
     which translates MCP JSON-RPC calls into REST API calls back to the
-    running Bodhiorchard backend.
+    running Glideship backend.
     """
 
     backend_url: str
@@ -678,6 +678,22 @@ async def run_claude_code(
         # agents emit markdown without persisting.
         "--settings",
         build_inline_settings_json(),
+        # Leave the host user's ``~/.claude/settings.json`` out of the
+        # subprocess. That file is where a developer enables plugins, and
+        # plugin hooks MERGE with ours rather than being replaced by the
+        # inline settings above — so a learning / explanatory output-style
+        # plugin's SessionStart hook kept injecting ``★ Insight`` blocks and
+        # chat framing into agent output despite ``outputStyle: "default"``.
+        # The inline ``--settings`` hooks above still load, and the auth
+        # paths we support (keychain ``claude login``, and the API key /
+        # OAuth token env vars ``build_claude_env`` forwards) don't live in
+        # that file. What does no longer reach the subprocess: the user
+        # file's ``env`` block, ``apiKeyHelper``, and its ``model`` default.
+        # A repo's own ``.claude/settings{,.local}.json`` still loads, so a
+        # plugin enabled there can still leak in — the result handlers
+        # strip insight blocks as the backstop.
+        "--setting-sources",
+        "project,local",
     ]
 
     # stream-json requires --verbose (Claude CLI constraint)

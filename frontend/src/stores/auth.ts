@@ -16,6 +16,7 @@ import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import type { User } from '@/types'
 import api from '@/services/api'
+import { extractApiError } from '@/utils/errors'
 import { forgetReturnTo } from '@/utils/returnTo'
 
 export const useAuthStore = defineStore('auth', () => {
@@ -31,7 +32,7 @@ export const useAuthStore = defineStore('auth', () => {
   // `token.value` would stay stale after an automatic refresh (any consumer
   // reading `authStore.token` would send the old expired JWT to services like
   // the Colyseus OrgRoom, which rejects it via onAuth).
-  window.addEventListener('bodhiorchard:token-refreshed', ((event: Event) => {
+  window.addEventListener('glideship:token-refreshed', ((event: Event) => {
     const detail = (event as CustomEvent<{ accessToken: string }>).detail
     if (detail?.accessToken) {
       token.value = detail.accessToken
@@ -61,16 +62,12 @@ export const useAuthStore = defineStore('auth', () => {
       }
       return true
     } catch (err: unknown) {
-      if (err && typeof err === 'object' && 'response' in err) {
-        const axiosErr = err as { response?: { status?: number; data?: { detail?: string } } }
-        if (axiosErr.response?.status === 401) {
-          loginError.value = 'Invalid email or password.'
-        } else {
-          loginError.value = axiosErr.response?.data?.detail || 'Login failed. Please try again.'
-        }
-      } else {
-        loginError.value = 'Network error. Please check your connection.'
-      }
+      const status = (err as { response?: { status?: number } } | null)?.response?.status
+      // A 422 carries FastAPI's validation list; extractApiError turns it
+      // into sentences rather than showing the raw JSON.
+      loginError.value = status === 401
+        ? 'Invalid email or password.'
+        : extractApiError(err, 'Login failed. Please try again.')
       return false
     }
   }
@@ -80,6 +77,8 @@ export const useAuthStore = defineStore('auth', () => {
     user.value = null
     localStorage.removeItem('bodhiorchard_token')
     localStorage.removeItem('bodhiorchard_refresh_token')
+    // A message from the last sign-in mustn't greet the next visit to login.
+    loginError.value = null
     // Never send whoever signs in next to this person's page.
     forgetReturnTo()
   }
@@ -96,14 +95,10 @@ export const useAuthStore = defineStore('auth', () => {
       mustChangePassword.value = false
       return null
     } catch (err: unknown) {
-      if (err && typeof err === 'object' && 'response' in err) {
-        const axiosErr = err as { response?: { status?: number; data?: { detail?: string } } }
-        if (axiosErr.response?.status === 401) {
-          return 'Session expired. Please log in again.'
-        }
-        return axiosErr.response?.data?.detail || 'Failed to change password.'
-      }
-      return 'Network error. Please check your connection.'
+      const status = (err as { response?: { status?: number } } | null)?.response?.status
+      return status === 401
+        ? 'Session expired. Please log in again.'
+        : extractApiError(err, 'Failed to change password.')
     }
   }
 

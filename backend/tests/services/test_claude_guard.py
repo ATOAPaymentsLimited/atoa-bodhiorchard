@@ -175,6 +175,12 @@ class TestClaudeRunnerIntegration:
         idx = argv.index("--add-dir")
         assert argv[idx + 1] == str(tmp_path)
 
+        # The host user's settings file (where plugins with SessionStart
+        # hooks are enabled) must stay out of the subprocess.
+        assert "--setting-sources" in argv, f"missing --setting-sources in {argv}"
+        sources = argv[argv.index("--setting-sources") + 1]
+        assert "user" not in str(sources).split(",")
+
     @pytest.mark.asyncio
     async def test_env_passed_to_spawn_excludes_secrets(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: object
@@ -272,7 +278,7 @@ class TestValidateWorkingDir:
         from app.services.claude_runner import _validate_working_dir
 
         # Silent fallback to the FastAPI worker cwd is gone — that path
-        # could land the agent inside the Bodhiorchard repo itself.
+        # could land the agent inside the Glideship repo itself.
         with pytest.raises(ValueError, match="working_dir is required"):
             _validate_working_dir(None)
 

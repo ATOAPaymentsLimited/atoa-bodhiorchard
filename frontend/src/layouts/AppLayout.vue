@@ -16,21 +16,29 @@
 
 <template>
   <v-app>
+    <!-- Phones get a top bar; the sidebar opens over the page from its
+         menu button instead of taking a third of the screen. -->
+    <MobileTopBar v-if="compact" v-model:drawer="overlayOpen" />
+
     <!-- Sidebar -->
     <v-navigation-drawer
-      v-model:rail="rail"
-      permanent
+      :model-value="compact ? overlayOpen : true"
+      :rail="rail"
+      :permanent="!compact"
+      :temporary="compact"
       color="surface"
-      :width="240"
+      :width="248"
       rail-width="68"
-      :expand-on-hover="!notificationMenuOpen"
+      :expand-on-hover="!compact && !notificationMenuOpen"
       class="app-sidebar"
+      @update:model-value="overlayOpen = $event"
     >
       <div
+        v-if="!compact"
         class="pa-4 pb-2 d-flex align-center"
         :class="rail ? 'justify-center' : 'justify-space-between'"
       >
-        <BodhiorchardLogo :size="28" :show-text="!rail" />
+        <BrandLogo :size="28" :show-text="!rail" />
         <!-- v-show (not v-if) so the menu stays mounted even when the
              drawer briefly collapses to rail — moving the mouse to a
              dropdown item shouldn't unmount its trigger. The drawer
@@ -45,21 +53,29 @@
       </div>
 
       <v-list density="compact" nav class="px-2">
-        <EngineeringNav v-if="canAccessEngineering" />
+        <EngineeringNav v-if="canAccessEngineering" :rail="rail" />
         <PeopleNav :rail="rail" :show-heading="canAccessEngineering" />
       </v-list>
 
       <template #append>
         <v-divider class="mb-2" />
         <v-list density="compact" nav class="px-2 pb-2">
+          <v-list-item
+            v-if="canAccessEngineering && canManageMembers"
+            prepend-icon="mdi-account-group-outline"
+            title="Members"
+            to="/members"
+            rounded="lg"
+          />
           <SettingsNav />
         </v-list>
 
         <UserMenu :rail="rail" />
 
         <!-- Collapse / expand toggle — sticky bottom of the drawer. -->
-        <v-divider />
+        <v-divider v-if="!compact" />
         <div
+          v-if="!compact"
           class="d-flex pa-1"
           :class="rail ? 'justify-center' : 'justify-end pe-2'"
         >
@@ -98,29 +114,29 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, ref, watch } from 'vue'
+import { onMounted, ref } from 'vue'
 import { useAuthStore } from '@/stores/auth'
-import BodhiorchardLogo from '@/components/common/BodhiorchardLogo.vue'
+import BrandLogo from '@/components/common/BrandLogo.vue'
 import NotificationBell from '@/components/common/NotificationBell.vue'
 import EngineeringNav from '@/components/layout/EngineeringNav.vue'
 import EngineeringOverlays from '@/components/layout/EngineeringOverlays.vue'
+import MobileTopBar from '@/components/layout/MobileTopBar.vue'
 import PeopleNav from '@/components/layout/PeopleNav.vue'
 import SettingsNav from '@/components/layout/SettingsNav.vue'
 import UserMenu from '@/components/layout/UserMenu.vue'
+import { useAppDrawer } from '@/composables/useAppDrawer'
 import { usePermissions } from '@/composables/usePermissions'
 import { useNavigationProgress } from '@/composables/useNavigationProgress'
 
 const authStore = useAuthStore()
-const { canAccessEngineering } = usePermissions()
+const { canAccessEngineering, canManageMembers } = usePermissions()
 
 // Driven by the router guards — true while any route navigation resolves.
 const { navigating } = useNavigationProgress()
 
-// Collapsed-sidebar preference, persisted across reloads. `expand-on-hover`
-// on the drawer means even in rail mode the user can peek labels without
-// flipping this flag.
-const RAIL_KEY = 'bodhiorchard_sidebar_rail'
-const rail = ref(localStorage.getItem(RAIL_KEY) === 'true')
+// Rail on wide screens (`expand-on-hover` still peeks the labels), an
+// overlay opened from the top bar on phones and small tablets.
+const { compact, rail, overlayOpen, toggleRail } = useAppDrawer()
 
 // While the notification bell's dropdown is open, freeze the drawer's
 // auto-collapse behaviour. Without this, moving the mouse off the
@@ -128,11 +144,6 @@ const rail = ref(localStorage.getItem(RAIL_KEY) === 'true')
 // which unmounts the bell trigger and dismisses the menu before the
 // click lands.
 const notificationMenuOpen = ref(false)
-watch(rail, (v) => localStorage.setItem(RAIL_KEY, String(v)))
-
-function toggleRail(): void {
-  rail.value = !rail.value
-}
 
 onMounted(() => {
   if (authStore.isAuthenticated && !authStore.user) {
@@ -152,39 +163,40 @@ onMounted(() => {
   margin-bottom: 4px;
 }
 
-/* Nav rhythm: quiet by default, leaf-green when active. The active item
-   carries a left indicator bar + a tonal wash so the current section reads
-   instantly without shouting. Motion is transform/opacity/colour only. */
+/* Nav rhythm: quiet by default; the active item is a soft blue wash with
+   blue text, so the current section reads instantly without shouting.
+   Motion is colour only. */
 .app-sidebar :deep(.v-list-item) {
-  margin-block: 2px;
+  margin-block: 1px;
+  min-height: 36px;
   transition: background-color var(--dur-short, 150ms) var(--ease-out, ease),
               color var(--dur-short, 150ms) var(--ease-out, ease);
 }
 
-.app-sidebar :deep(.v-list-item:hover) {
+.app-sidebar :deep(.v-list-item .v-list-item-title) {
+  font-size: 14px;
+}
+
+.app-sidebar :deep(.v-list-item:not(.v-list-item--active):hover) {
   background: rgb(var(--v-theme-surface-bright));
 }
 
 .app-sidebar :deep(.v-list-item--active) {
-  color: rgb(var(--v-theme-primary));
+  color: var(--color-accent-text, rgb(var(--v-theme-primary)));
   background: var(--color-accent-soft, rgba(var(--v-theme-primary), 0.14));
 }
 
-.app-sidebar :deep(.v-list-item--active)::before {
-  content: '';
-  position: absolute;
-  left: 0;
-  top: 50%;
-  transform: translateY(-50%);
-  width: 3px;
-  height: 60%;
-  border-radius: 0 var(--radius-pill, 999px) var(--radius-pill, 999px) 0;
-  background: rgb(var(--v-theme-primary));
-  opacity: 1;
+/* Vuetify paints its own overlay on active items; the wash above replaces it. */
+.app-sidebar :deep(.v-list-item--active > .v-list-item__overlay) {
+  opacity: 0;
+}
+
+.app-sidebar :deep(.v-list-item--active .v-list-item-title) {
+  font-weight: 500;
 }
 
 .app-sidebar :deep(.v-list-item--active .v-icon) {
-  color: rgb(var(--v-theme-primary));
+  color: var(--color-accent-text, rgb(var(--v-theme-primary)));
 }
 
 .app-main {
