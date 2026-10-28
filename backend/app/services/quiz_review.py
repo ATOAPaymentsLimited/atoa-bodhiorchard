@@ -32,6 +32,7 @@ from app.repositories.quiz_question import QuizQuestionRepository
 from app.repositories.quiz_topic_history import QuizTopicHistoryRepository
 from app.schemas.quiz import QuizReviewEdit
 from app.services.quiz_content import validate_question_content
+from app.services.quiz_giveaway import reject_answer_giveaway
 
 _TOPIC_LABEL_MAX = 255
 
@@ -91,6 +92,12 @@ async def edit_question(
 
     # Re-run the per-type content check so a bad hand-edit can't be saved.
     validate_question_content(question.question_type, question.payload, question.answer_key)
+    # Only an edit to what players see (or to the answer) can create a giveaway;
+    # fixing the explanation of an older question must not trip the check.
+    if edit.prompt is not None or edit.payload is not None or edit.answer_key is not None:
+        reject_answer_giveaway(
+            question.question_type, question.prompt, question.payload, question.answer_key
+        )
     await db.flush()
     return question
 
