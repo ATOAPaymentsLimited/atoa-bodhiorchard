@@ -22,29 +22,35 @@ payload, exit 0/2 contract), so the *same* dev-activity + BUD-todo scripts
 work for all three; only the config file that wires scripts→events differs.
 
 This module writes, for a Codex/Copilot org:
-  * the shared hook scripts under ``.bodhiorchard/hooks/`` (reusing the
+  * the shared hook scripts under ``.glideship/hooks/`` (reusing the
     ``repo_setup._build_*_sh`` builders — one source of truth),
   * the provider-native hook config (``.codex/hooks.json`` /
     ``.github/hooks/copilot-cli-policy.json``),
-  * the provider MCP config (``.codex/config.toml`` /
-    ``.github/copilot/mcp-config.json``), pointing at the shared
-    ``.bodhiorchard/mcp_bridge.py``,
+  * the provider MCP config (merged into ``.codex/config.toml``, or for
+    Copilot the repo-root ``.mcp.json`` it shares with Claude), pointing at the shared
+    ``.glideship/mcp_bridge.py``,
   * ``AGENTS.md`` (the provider-neutral form of the CLAUDE.md section).
 
-The generic files (``.githooks/``, ``.gitignore``, ``package.json`` prepare,
-the MCP bridge) are written for every provider by the existing helpers.
+The generic files (``.githooks/``, ``package.json`` prepare, the MCP
+bridge) are written for every provider by the existing helpers.
 """
 
 from __future__ import annotations
 
 import contextlib
 import json
-import shutil
 from pathlib import Path
 
 import structlog
 
 from app.models.organization import AIProvider
+from app.services.repo_codex_toml import CODEX_CONFIG, merge_codex_server
+from app.services.repo_mcp_json import (
+    McpJsonMerge,
+    copilot_mcp_json,
+    copy_mcp_bridge,
+    merge_glideship_server,
+)
 from app.services.repo_setup import (
     _BG_END,
     _BG_START,
@@ -61,13 +67,14 @@ from app.services.repo_setup import (
     _build_subagent_stop_sh,
     _build_tool_error_track_sh,
 )
+from app.services.repo_setup_names import HOOKS_DIR
 
 logger = structlog.get_logger(__name__)
 
 # Where the shared scripts live for non-Claude providers. Under
-# ``.bodhiorchard/`` (gitignored → force-added by ``_stage_file_args``) so
-# the repo root stays uncluttered and the dir name signals ownership.
-_HOOKS_SUBDIR = ".bodhiorchard/hooks"
+# ``.glideship/`` so the repo root stays uncluttered and the dir name
+# signals ownership.
+_HOOKS_SUBDIR = HOOKS_DIR
 
 
 def _shared_scripts(backend_url: str) -> list[tuple[str, str]]:
@@ -88,7 +95,7 @@ def _shared_scripts(backend_url: str) -> list[tuple[str, str]]:
 
 
 def _write_shared_scripts(repo: Path, backend_url: str) -> bool:
-    """Write the shared hook scripts under ``.bodhiorchard/hooks/``. Idempotent."""
+    """Write the shared hook scripts under ``.glideship/hooks/``. Idempotent."""
     hooks_dir = repo / _HOOKS_SUBDIR
     hooks_dir.mkdir(parents=True, exist_ok=True)
     changed = False
@@ -184,57 +191,6 @@ def _write_json_if_changed(path: Path, data: dict[str, object]) -> bool:
     return True
 
 
-def _codex_config_toml(backend_url: str) -> str:
-    """``.codex/config.toml`` MCP block pointing at the shared stdio bridge.
-
-    ``default_tools_approval_mode = "approve"`` lets the bodhiorchard tools
-    run without a per-call approval prompt (mirrors the per-invocation flag
-    the backend adapter passes), so BUD-todo claims don't stall.
-    """
-    return (
-        "# Added by Glideship — MCP server for BUD tooling + code intelligence.\n"
-        "[mcp_servers.bodhiorchard]\n"
-        'command = "python3"\n'
-        'args = [".bodhiorchard/mcp_bridge.py"]\n'
-        'default_tools_approval_mode = "approve"\n\n'
-        "[mcp_servers.bodhiorchard.env]\n"
-        f'BODHIORCHARD_BACKEND_URL = "{backend_url}"\n'
-    )
-
-
-def _write_codex_config_toml(repo: Path, backend_url: str) -> bool:
-    """Write/replace the bodhiorchard block in ``.codex/config.toml``. Idempotent."""
-    block = _codex_config_toml(backend_url)
-    path = repo / ".codex" / "config.toml"
-    existing = path.read_text(encoding="utf-8", errors="replace") if path.exists() else None
-    if existing is not None and existing.strip() == block.strip():
-        return False
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(block, encoding="utf-8")
-    return True
-
-
-def _mcp_json_config(backend_url: str) -> dict[str, object]:
-    """Standard ``mcpServers`` shape shared by the copilot MCP file."""
-    return {
-        "mcpServers": {
-            "bodhiorchard": {
-                "command": "python3",
-                "args": [".bodhiorchard/mcp_bridge.py"],
-                "env": {"BODHIORCHARD_BACKEND_URL": backend_url},
-            }
-        }
-    }
-
-
-def _copy_mcp_bridge(repo: Path) -> None:
-    """Copy the STDIO bridge into the repo (shared by every provider's MCP)."""
-    source = Path(__file__).resolve().parents[2] / "mcp" / "stdio_bridge.py"
-    dest_dir = repo / ".bodhiorchard"
-    dest_dir.mkdir(exist_ok=True)
-    shutil.copy2(source, dest_dir / "mcp_bridge.py")
-
-
 def _agents_md_section() -> str:
     """Provider-neutral form of the CLAUDE.md workflow section for AGENTS.md."""
     return (
@@ -264,15 +220,19 @@ def install_agent_hooks(repo_path: str, backend_url: str, provider: AIProvider) 
 
 
 def write_agent_mcp_config(repo_path: str, backend_url: str, provider: AIProvider) -> bool:
-    """Copy the bridge + write the provider's MCP config. Idempotent."""
+    """Copy the bridge + write the provider's MCP config. Idempotent.
+
+    Copilot reads the repo-root ``.mcp.json`` (the file Claude uses), or
+    ``.github/mcp.json`` when only that exists; the server is merged into
+    whichever it reads, alongside whatever the repo already lists.
+    """
     repo = Path(repo_path)
-    _copy_mcp_bridge(repo)
+    copy_mcp_bridge(repo)
     if provider == AIProvider.codex:
-        changed = _write_codex_config_toml(repo, backend_url)
+        changed = merge_codex_server(repo / CODEX_CONFIG, backend_url) is McpJsonMerge.WRITTEN
     elif provider == AIProvider.copilot:
-        changed = _write_json_if_changed(
-            repo / ".github" / "copilot" / "mcp-config.json", _mcp_json_config(backend_url)
-        )
+        merge = merge_glideship_server(copilot_mcp_json(repo), backend_url)
+        changed = merge is McpJsonMerge.WRITTEN
     else:
         changed = False
     logger.info("agent_mcp_written", repo=repo_path, provider=provider.value, changed=changed)
@@ -280,7 +240,7 @@ def write_agent_mcp_config(repo_path: str, backend_url: str, provider: AIProvide
 
 
 def append_agent_instructions(repo_path: str, provider: AIProvider) -> bool:
-    """Write/replace the bodhiorchard section in ``AGENTS.md``. Idempotent.
+    """Write/replace the Glideship section in ``AGENTS.md``. Idempotent.
 
     Both Codex and Copilot read ``AGENTS.md`` for repo instructions. Uses the
     same ``<!-- bodhiorchard:start/end -->`` markers as the CLAUDE.md path so
