@@ -19,6 +19,8 @@ import type { BUDListItem, BUDDocument, BUDStatus, BUDPriority, BUDDesign, BUDEs
 import { BUD_STATUS_ORDER, CODE_REVIEW_OVERRIDE_REASON_MIN } from '@/types'
 import api from '@/services/api'
 import { extractApiError } from '@/utils/errors'
+import { latestCall } from '@/utils/latestCall'
+import { createBudReplyOrder } from './budReplyOrder'
 
 // Maps legacy DB status values to new pipeline statuses (pre-migration compat)
 const LEGACY_STATUS_MAP: Record<string, BUDStatus> = {
@@ -41,6 +43,15 @@ export const useBUDStore = defineStore('bud', () => {
   const currentBUD = ref<BUDDocument | null>(null)
   const loading = ref(false)
   const error = ref('')
+  // Orders the replies that replace currentBUD; see budReplyOrder.ts.
+  const replyOrder = createBudReplyOrder()
+
+  /** Show a write's reply. Stamped on answer, it outranks every read sent before it. */
+  function showWriteReply(id: string, data: BUDDocument): void {
+    if (currentBUD.value?.id === id && replyOrder.accept(id, replyOrder.stamp())) {
+      currentBUD.value = data
+    }
+  }
 
   const budsByStatus = computed(() => {
     const grouped: Record<string, BUDListItem[]> = {}
@@ -75,16 +86,16 @@ export const useBUDStore = defineStore('bud', () => {
 
   // Latest fetchBUD call. Moving from /buds/A to /buds/B while A is still
   // loading must not let A's late reply replace B on the page.
-  let fetchSeq = 0
+  const beginFetch = latestCall()
 
   async function fetchBUD(id: string): Promise<BUDDocument | null> {
-    const seq = ++fetchSeq
-    const latest = (): boolean => seq === fetchSeq
+    const latest = beginFetch()
     loading.value = true
     error.value = ''
+    const sentAt = replyOrder.stamp()
     try {
       const { data } = await api.get(`/v1/buds/${id}`)
-      if (latest()) currentBUD.value = data
+      if (latest() && replyOrder.accept(id, sentAt)) currentBUD.value = data
       return data
     } catch {
       if (latest()) error.value = 'Failed to load BUD'
@@ -111,9 +122,13 @@ export const useBUDStore = defineStore('bud', () => {
    */
   async function refreshBUDIfCurrent(id: string): Promise<BUDDocument | null> {
     if (currentBUD.value?.id !== id) return null
+    // A read sent while a write is open can see the row before it commits.
+    await replyOrder.settled(id)
+    if (currentBUD.value?.id !== id) return null
+    const sentAt = replyOrder.stamp()
     try {
       const { data } = await api.get(`/v1/buds/${id}`)
-      if (currentBUD.value?.id === id) {
+      if (currentBUD.value?.id === id && replyOrder.accept(id, sentAt)) {
         currentBUD.value = data
       }
       return data
@@ -122,6 +137,17 @@ export const useBUDStore = defineStore('bud', () => {
       // leaves the view on the previous payload until the next
       // refresh fires. The error banner is reserved for foreground
       // ``fetchBUD`` paths.
+      return null
+    }
+  }
+
+  /** One BUD's latest read without opening it (the board's stage-change guards); null on failure. */
+  async function peekBUD(id: string): Promise<BUDDocument | null> {
+    await replyOrder.settled(id)
+    try {
+      const { data } = await api.get(`/v1/buds/${id}`)
+      return data
+    } catch {
       return null
     }
   }
@@ -157,21 +183,31 @@ export const useBUDStore = defineStore('bud', () => {
     }
   }
 
-  // Signal that design phase was entered (frontend should show repo selection)
-  const designAvailable = ref(false)
+  // The BUD that just entered the design phase: its design panel starts
+  // generation (repo selection) once opened, here or later from the board.
+  const designAvailableFor = ref<string | null>(null)
+
+  /**
+   * Write a BUD's latest read into its list row. Merged, not swapped: the
+   * row carries fields one BUD's read doesn't (bug count, origin card).
+   */
+  function mergeListRow(id: string, data: BUDDocument): void {
+    const idx = buds.value.findIndex(p => p.id === id)
+    if (idx !== -1) buds.value[idx] = { ...buds.value[idx], ...data }
+  }
 
   async function updateBUD(id: string, updates: Partial<BUDDocument>): Promise<BUDDocument | null> {
     error.value = ''
-    designAvailable.value = false
+    // A later write (moved out of design again) cancels the signal.
+    if (designAvailableFor.value === id) designAvailableFor.value = null
     try {
-      const resp = await api.patch(`/v1/buds/${id}`, updates)
+      const resp = await replyOrder.track(id, () => api.patch(`/v1/buds/${id}`, updates))
       const data = resp.data
-      const idx = buds.value.findIndex(p => p.id === id)
-      if (idx !== -1) buds.value[idx] = data
-      if (currentBUD.value?.id === id) currentBUD.value = data
+      mergeListRow(id, data)
+      showWriteReply(id, data)
       // Check if backend signals design phase transition
       if (resp.headers['x-design-available'] === 'true') {
-        designAvailable.value = true
+        designAvailableFor.value = id
       }
       return data
     } catch (err) {
@@ -197,15 +233,9 @@ export const useBUDStore = defineStore('bud', () => {
   async function restoreBUD(id: string): Promise<BUDDocument | null> {
     error.value = ''
     try {
-      const { data } = await api.post(`/v1/buds/${id}/restore`)
-      const idx = buds.value.findIndex(p => p.id === id)
-      if (idx !== -1) {
-        // BUDRead carries no ``open_bug_count`` (it's a transient the list
-        // endpoint injects), so a verbatim swap would blank the bug badge
-        // on the restored card until the next full fetch. Carry it over.
-        buds.value[idx] = { ...data, open_bug_count: buds.value[idx].open_bug_count }
-      }
-      if (currentBUD.value?.id === id) currentBUD.value = data
+      const { data } = await replyOrder.track(id, () => api.post(`/v1/buds/${id}/restore`))
+      mergeListRow(id, data)
+      showWriteReply(id, data)
       return data
     } catch (err) {
       error.value = extractApiError(err, 'Failed to restore BUD')
@@ -318,8 +348,10 @@ export const useBUDStore = defineStore('bud', () => {
       formData.append('file', file)
       // No Content-Type override needed: the request interceptor clears
       // it for FormData so the browser can attach the boundary.
-      const { data } = await api.post(`/v1/buds/${id}/import/${section}`, formData)
-      if (currentBUD.value?.id === id) currentBUD.value = data
+      const { data } = await replyOrder.track(
+        id, () => api.post(`/v1/buds/${id}/import/${section}`, formData),
+      )
+      showWriteReply(id, data)
       return true
     } catch {
       error.value = 'Failed to import file'
@@ -531,10 +563,11 @@ export const useBUDStore = defineStore('bud', () => {
   ): Promise<BUDDocument | null> {
     error.value = ''
     try {
-      const { data } = await api.post(`/v1/buds/${budId}/code-review/override`, { reason })
-      if (currentBUD.value?.id === budId) currentBUD.value = data
-      const idx = buds.value.findIndex(p => p.id === budId)
-      if (idx !== -1) buds.value[idx] = data
+      const { data } = await replyOrder.track(
+        budId, () => api.post(`/v1/buds/${budId}/code-review/override`, { reason }),
+      )
+      showWriteReply(budId, data)
+      mergeListRow(budId, data)
       return data
     } catch (err) {
       const axiosErr = err as AxiosError<{ detail?: string }>
@@ -586,10 +619,11 @@ export const useBUDStore = defineStore('bud', () => {
   async function requestReassignment(budId: string, reason: string): Promise<BUDDocument | null> {
     error.value = ''
     try {
-      const { data } = await api.post(`/v1/buds/${budId}/request-reassignment`, { reason })
-      if (currentBUD.value?.id === budId) currentBUD.value = data
-      const idx = buds.value.findIndex(p => p.id === budId)
-      if (idx !== -1) buds.value[idx] = data
+      const { data } = await replyOrder.track(
+        budId, () => api.post(`/v1/buds/${budId}/request-reassignment`, { reason }),
+      )
+      showWriteReply(budId, data)
+      mergeListRow(budId, data)
       return data
     } catch {
       error.value = 'Failed to request reassignment'
@@ -692,11 +726,12 @@ export const useBUDStore = defineStore('bud', () => {
     currentBUD,
     loading,
     error,
-    designAvailable,
+    designAvailableFor,
     budsByStatus,
     fetchBUDs,
     fetchBUD,
     refreshBUDIfCurrent,
+    peekBUD,
     createBUD,
     updateBUD,
     restoreBUD,

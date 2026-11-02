@@ -105,8 +105,10 @@
           <template #append>
             <v-tooltip text="Revoke this token" location="top">
               <template #activator="{ props: tipProps }">
+                <!-- The tooltip only describes the button; the label names it. -->
                 <v-btn
                   v-bind="tipProps"
+                  :aria-label="`Revoke ${t.name}`"
                   icon="mdi-delete-outline"
                   size="small"
                   variant="text"
@@ -402,6 +404,8 @@ const TOOL_GROUPS: { label: string; tools: { name: string; description: string }
     tools: [
       { name: 'create_bud', description: 'Create a new BUD; the calling token\'s user is set as both creator and assignee.' },
       { name: 'update_bud', description: 'Update the content field owned by the BUD\'s current phase. Assignee-only; the server picks the editable field from the phase.' },
+      { name: 'create_todo', description: 'Add a TODO to a BUD\'s plan for work the tech-spec plan missed. Created pending and unassigned; a later regenerate keeps it.' },
+      { name: 'update_todo', description: 'Edit a TODO\'s title and/or description. Content only; status and assignment are managed elsewhere.' },
     ],
   },
 ]
@@ -480,7 +484,7 @@ const EXAMPLE_PROMPTS: Record<string, ExamplePrompt> = {
     label: 'PM / PRD',
     create: `I want to create a BUD for: <your topic>
 
-Use the bodhiorchard MCP server I've connected. Steps:
+Use the glideship MCP server I've connected. Steps:
 1. Call get_prompt(task_type="pm") and follow that prompt EXACTLY for
    the body shape.
 2. Call get_bud_context() to see what's already in flight — refuse to
@@ -634,7 +638,7 @@ const SNIPPETS: Record<string, ClientSnippet> = {
     render: (url) => `// ~/Library/Application Support/Claude/claude_desktop_config.json
 {
   "mcpServers": {
-    "bodhiorchard": {
+    "glideship": {
       "command": "npx",
       "args": [
         "-y",
@@ -652,7 +656,7 @@ const SNIPPETS: Record<string, ClientSnippet> = {
     render: (url) => `// ~/.cursor/mcp.json
 {
   "mcpServers": {
-    "bodhiorchard": {
+    "glideship": {
       "command": "npx",
       "args": [
         "-y",
@@ -669,7 +673,7 @@ const SNIPPETS: Record<string, ClientSnippet> = {
     label: 'Continue',
     render: (url) => `// ~/.continue/config.json — under "experimental.mcpServers"
 {
-  "name": "bodhiorchard",
+  "name": "glideship",
   "command": "npx",
   "args": [
     "-y",
@@ -897,7 +901,8 @@ onMounted(refresh)
   font-family: var(--font-mono, 'Menlo', monospace);
   font-size: 12px;
   font-weight: 600;
-  color: rgb(var(--v-theme-primary));
+  /* Body text colour: primary on this grey chip missed WCAG AA contrast. */
+  color: rgb(var(--v-theme-on-surface));
 }
 .tool-row__description {
   font-size: 13px;

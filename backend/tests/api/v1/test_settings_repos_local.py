@@ -45,8 +45,10 @@ from httpx import ASGITransport, AsyncClient
 
 from app.api.v1 import settings_repos_local as local_api
 from app.config import settings as app_settings
-from app.core.auth_deps import get_current_user, get_db
+from app.core.auth_deps import get_current_user
 from app.core.permission_deps import PermissionSet, get_permission_set
+from app.database import request_session
+from app.services.managed_worktrees import DEVELOP_WORKTREE, worktree_path
 
 BROWSE = "/api/v1/settings/repos/browse-directories"
 BRANCHES = "/api/v1/settings/repos/local-branches"
@@ -60,7 +62,7 @@ def _app(permissions: frozenset[str] | None) -> FastAPI:
     """The router at its production prefix; ``None`` means no session."""
     app = FastAPI()
     app.include_router(local_api.router, prefix="/api/v1/settings")
-    app.dependency_overrides[get_db] = _no_db
+    app.dependency_overrides[request_session] = _no_db
     if permissions is not None:
         user = SimpleNamespace(id=uuid.uuid4(), must_change_password=False)
         app.dependency_overrides[get_current_user] = lambda: user
@@ -239,7 +241,14 @@ class TestServesThePicker:
         _git("init", "-q", "-b", "main", cwd=repo)
         _git("commit", "-q", "--allow-empty", "-m", "init", cwd=repo)
         _git("branch", "develop", cwd=repo)
-        _git("worktree", "add", "-q", str(repo / ".bodhiorchard" / "develop"), "develop", cwd=repo)
+        _git(
+            "worktree",
+            "add",
+            "-q",
+            str(worktree_path(str(repo), DEVELOP_WORKTREE)),
+            "develop",
+            cwd=repo,
+        )
 
         response = await editor.get(BRANCHES, params={"path": str(repo)})
 
