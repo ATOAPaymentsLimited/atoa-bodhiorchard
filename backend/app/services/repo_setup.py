@@ -12,14 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Repository setup: MCP init, hooks, gitignore, package.json, commit/push, PR creation.
+"""Repository setup: MCP init, hooks, package.json, commit/push, PR creation.
 
 Handles all the file-level setup that Glideship performs on a tracked
 repository: writing ``.claude/settings.json``, installing git hooks,
-updating ``.gitignore``, adding a ``prepare`` script to ``package.json``,
-and committing + pushing the result as a PR-ready branch.
+adding a ``prepare`` script to ``package.json``, and committing + pushing
+the result as a PR-ready branch.
 """
 
+import contextlib
 import json
 import shutil
 import textwrap
@@ -32,6 +33,7 @@ from typing import Any
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.mcp.bridge_env import LEGACY_MCP_TOKEN_ENV, MCP_TOKEN_ENV
 from app.models.organization import Organization
 from app.models.tracked_repository import SetupPrState, TrackedRepository
 from app.services.git_operations import (
@@ -44,6 +46,27 @@ from app.services.github_app_auth import (
     get_installation_token,
 )
 from app.services.github_client import GitHubClient
+from app.services.managed_worktrees import (
+    DEVELOP_WORKTREE,
+    SETUP_WORKTREE,
+    prepare_worktrees_dir,
+    worktree_path,
+)
+from app.services.repo_mcp_json import (
+    GITHUB_MCP_JSON,
+    MCP_JSON,
+    McpJsonMerge,
+    copy_mcp_bridge,
+    merge_glideship_server,
+)
+from app.services.repo_setup_names import (
+    BRIDGE_PATH,
+    HOOKS_DIR,
+    LEGACY_MCP_SERVER_KEY,
+    MCP_SERVER_KEY,
+    REPO_DIR,
+    mcp_server_entry,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -63,12 +86,25 @@ _SETUP_BRANCH = "bodhiorchard/init-setup"
 # without an identity. The ``@users.noreply.github.com`` form keeps any
 # real email out of the commit history. Keep this in sync with the
 # bot account that owns the GitHub App installation token.
-_SETUP_COMMIT_AUTHOR_NAME = "Bodhigroove"
-_SETUP_COMMIT_AUTHOR_EMAIL = "bodhigroove@users.noreply.github.com"
+_SETUP_COMMIT_AUTHOR_NAME = "Glideship"
+_SETUP_COMMIT_AUTHOR_EMAIL = "glideship@users.noreply.github.com"
+_SETUP_COMMIT_MESSAGE = (
+    "chore(glideship): add MCP tools, git hooks, and config\n\n"
+    "Auto-committed by Glideship scan pipeline.\n"
+    "- .mcp.json + .claude/settings.json: Glideship MCP server config\n"
+    "- .githooks/: pre-commit (BUD validation) + post-commit (tracking)\n"
+    "- package.json: prepare script sets core.hooksPath on npm install\n"
+    f"- {BRIDGE_PATH}: stdio bridge spawned by .mcp.json\n"
+    "- CLAUDE.md: Glideship code-intelligence MCP guidance\n"
+    "- .claude/skills/: Glideship agent skill definitions"
+)
+
+# The ``bodhiorchard`` markers predate the rename and stay as-is: they are
+# how a re-run finds the section it wrote before, in repos old and new.
 _BG_START = "<!-- bodhiorchard:start -->"
 _BG_END = "<!-- bodhiorchard:end -->"
 
-_BODHIORCHARD_CLAUDE_SECTION = """\
+_BODHIORCHARD_CLAUDE_SECTION = f"""\
 <!-- bodhiorchard:start -->
 ---
 
@@ -83,8 +119,9 @@ Before starting any BUD work, verify Glideship MCP is connected:
 2. If NOT available, set up your token:
    - Go to Glideship Settings → Integrations → MCP Token
    - Copy your token
-   - Run: `export BODHIORCHARD_MCP_TOKEN="your-token"` in your shell profile
+   - Run: `export {MCP_TOKEN_ENV}="your-token"` in your shell profile
    - Restart Claude Code
+   - An older `{LEGACY_MCP_TOKEN_ENV}` export still works, but the new name wins
 
 ### Always Do
 
@@ -107,7 +144,7 @@ Before starting any BUD work, verify Glideship MCP is connected:
 
 ### Code Intelligence
 
-This repo is indexed by bodhiorchard's own code-graph indexer (graphify
+This repo is indexed by Glideship's own code-graph indexer (graphify
 under the hood). **Always run `code_impact` before editing any function,
 class, or method.** It returns the upstream callers + downstream callees
 so you can see the blast radius of a change. Pair with `code_context`
@@ -151,7 +188,7 @@ Claude Code hooks in `.claude/hooks/` run automatically — no developer action 
 - **Stop**: Reports activity summaries after each Claude response
 - **UserPromptSubmit**: Detects BUD references in your prompts
 
-These hooks use your `BODHIORCHARD_MCP_TOKEN` for authentication.
+These hooks use your `{MCP_TOKEN_ENV}` for authentication.
 If the token is not set, hooks silently do nothing.
 <!-- bodhiorchard:end -->
 """
@@ -163,8 +200,7 @@ _CLAUDE_HOOK_MARKER = "# bodhiorchard-claude-hook"
 
 _SETUP_FILES = [
     ".claude/settings.json",
-    ".mcp.json",
-    ".gitignore",
+    MCP_JSON,
     ".githooks/pre-commit",
     ".githooks/post-commit",
     ".claude/hooks/_common.sh",
@@ -181,37 +217,36 @@ _SETUP_FILES = [
     "package.json",
     "CLAUDE.md",
     ".claude/skills/",
-    ".bodhiorchard/mcp_bridge.py",
+    BRIDGE_PATH,
     # Provider-aware setup (Codex / Copilot). ``commit_and_push_setup_worktree``
     # stages only files that EXIST, so a Claude org skips these and a
-    # Codex/Copilot org skips the ``.claude/*`` + ``.mcp.json`` + ``CLAUDE.md``
-    # set above. The shared hook scripts live under ``.bodhiorchard/hooks/``
-    # (force-added past .gitignore) and are wired per-provider by
-    # ``agent_repo_config``. See that module for the event maps.
+    # Codex/Copilot org skips the ``.claude/*`` + ``CLAUDE.md`` set above.
+    # ``.mcp.json`` is shared: Claude and Copilot orgs both write it. The
+    # shared hook scripts live under ``HOOKS_DIR`` and are wired per-provider
+    # by ``agent_repo_config``. See that module for the event maps.
     "AGENTS.md",
     ".codex/hooks.json",
     ".codex/config.toml",
     ".github/hooks/copilot-cli-policy.json",
-    ".github/copilot/mcp-config.json",
-    ".bodhiorchard/hooks/_common.sh",
-    ".bodhiorchard/hooks/session-start.sh",
-    ".bodhiorchard/hooks/session-end.sh",
-    ".bodhiorchard/hooks/post-commit-track.sh",
-    ".bodhiorchard/hooks/file-change-track.sh",
-    ".bodhiorchard/hooks/tool-error-track.sh",
-    ".bodhiorchard/hooks/api-error-track.sh",
-    ".bodhiorchard/hooks/activity-report.sh",
-    ".bodhiorchard/hooks/detect-bud-prompt.sh",
-    ".bodhiorchard/hooks/subagent-start.sh",
-    ".bodhiorchard/hooks/subagent-stop.sh",
+    GITHUB_MCP_JSON,
+    f"{HOOKS_DIR}/_common.sh",
+    f"{HOOKS_DIR}/session-start.sh",
+    f"{HOOKS_DIR}/session-end.sh",
+    f"{HOOKS_DIR}/post-commit-track.sh",
+    f"{HOOKS_DIR}/file-change-track.sh",
+    f"{HOOKS_DIR}/tool-error-track.sh",
+    f"{HOOKS_DIR}/api-error-track.sh",
+    f"{HOOKS_DIR}/activity-report.sh",
+    f"{HOOKS_DIR}/detect-bud-prompt.sh",
+    f"{HOOKS_DIR}/subagent-start.sh",
+    f"{HOOKS_DIR}/subagent-stop.sh",
 ]
 
-# Paths in ``_SETUP_FILES`` whose parent directory is in ``.gitignore``.
+# Paths in ``_SETUP_FILES`` whose parent directory may be in ``.gitignore``.
 # ``git add`` silently skips ignored files, so these need ``-f`` on first
-# stage. Once tracked, git tracks them regardless of .gitignore on every
-# subsequent scan, so the force flag is only load-bearing for the initial
-# bootstrap PR.
-_FORCE_ADD_PREFIXES = (".bodhiorchard/",)
+# stage. Glideship never ignores ``REPO_DIR`` itself, but a team's own
+# ignore rules might; once tracked, git tracks the files regardless.
+_FORCE_ADD_PREFIXES = (f"{REPO_DIR}/",)
 
 
 def _stage_file_args(filepath: str) -> list[str]:
@@ -270,11 +305,8 @@ def append_bodhiorchard_claude_instructions(repo_path: str) -> bool:
 # ── Worktree management ───────────────────────────────────────────
 
 
-_SETUP_WORK_DIR = ".bodhiorchard/setup-work"
-
-
 async def prepare_setup_worktree(repo_path: str, base_branch: str) -> str | None:
-    """Create a clean worktree at ``<repo>/.bodhiorchard/setup-work``.
+    """Create a clean ``setup-work`` worktree under the managed worktrees dir.
 
     The setup phase writes hooks, MCP config, ``CLAUDE.md`` additions,
     skills, and ``package.json`` ``prepare`` scripts that need to land
@@ -301,8 +333,8 @@ async def prepare_setup_worktree(repo_path: str, base_branch: str) -> str | None
     pre-condition failure and surface it instead of cascading into
     ingest).
     """
-    repo = Path(repo_path)
-    work_path = repo / _SETUP_WORK_DIR
+    await prepare_worktrees_dir(repo_path)
+    work_path = worktree_path(repo_path, SETUP_WORKTREE)
     work_str = str(work_path)
 
     if work_path.exists():
@@ -382,15 +414,7 @@ async def commit_and_push_setup_worktree(work_path: str) -> str | None:
             f"user.name={_SETUP_COMMIT_AUTHOR_NAME}",
             "commit",
             "-m",
-            "chore(bodhiorchard): add MCP tools, git hooks, and config\n\n"
-            "Auto-committed by Glideship scan pipeline.\n"
-            "- .claude/settings.json: Glideship MCP server config\n"
-            "- .githooks/: pre-commit (BUD validation) + post-commit (tracking)\n"
-            "- package.json: prepare script sets core.hooksPath on npm install\n"
-            "- .gitignore: exclude .bodhiorchard/ worktrees\n"
-            "- .bodhiorchard/mcp_bridge.py: stdio bridge spawned by .mcp.json\n"
-            "- CLAUDE.md: bodhi code-intelligence MCP guidance\n"
-            "- .claude/skills/: bodhi agent skill definitions",
+            _SETUP_COMMIT_MESSAGE,
         ],
         cwd=work_path,
     )
@@ -465,9 +489,7 @@ async def ensure_repo_worktrees(repo_path: str) -> tuple[str | None, str | None]
         Either may be None if the branch doesn't exist or adoption
         fails in a way that requires manual intervention.
     """
-    repo = Path(repo_path)
-    worktree_dir = repo / ".bodhiorchard"
-    worktree_dir.mkdir(exist_ok=True)
+    await prepare_worktrees_dir(repo_path)
 
     main_branch = await _detect_main_branch(repo_path)
     develop_branch = await _detect_develop_branch(repo_path)
@@ -482,12 +504,12 @@ async def ensure_repo_worktrees(repo_path: str) -> tuple[str | None, str | None]
     # rm -rf'd out from under git don't block the adoption check below.
     await run_git(["worktree", "prune"], cwd=repo_path)
 
-    # Tear down any leftover ``.bodhiorchard/main`` worktree from a
+    # Tear down any leftover ``main`` worktree from a
     # previous deployment. We no longer create it (see comment below),
     # and leaving it around would block ``ingest``'s ``scan-test/main``
     # worktree from being added (git refuses two worktrees on the same
     # branch).
-    stale_main = worktree_dir / "main"
+    stale_main = worktree_path(repo_path, "main")
     if stale_main.exists():
         await run_git(["worktree", "remove", str(stale_main), "--force"], cwd=repo_path)
         await run_git(["worktree", "prune"], cwd=repo_path)
@@ -497,7 +519,7 @@ async def ensure_repo_worktrees(repo_path: str) -> tuple[str | None, str | None]
     # ``main`` is intentionally NOT materialised here. It used to back the
     # old setup-and-merge flow that wrote setup files into a main-branch
     # worktree and merged them locally — that flow is gone (replaced by
-    # ``prepare_setup_worktree``), and keeping ``.bodhiorchard/main``
+    # ``prepare_setup_worktree``), and keeping a ``main`` worktree
     # around now collides with the ``ingest`` stage's ``scan-test/main``
     # worktree (git refuses two worktrees on the same branch). ``main_wt``
     # in the return tuple stays for callers that destructure it, but
@@ -510,7 +532,7 @@ async def ensure_repo_worktrees(repo_path: str) -> tuple[str | None, str | None]
         if develop_branch == current_branch:
             results[1] = repo_path
         else:
-            wt_path = worktree_dir / "develop"
+            wt_path = worktree_path(repo_path, DEVELOP_WORKTREE)
             path = await _adopt_or_create_worktree(
                 repo_path=repo_path,
                 wt_path=wt_path,
@@ -618,52 +640,35 @@ def _same_path(a: Path, b: Path) -> bool:
 async def init_bodhiorchard_mcp_in_repo(repo_path: str, backend_url: str) -> bool:
     """Write .mcp.json and .claude/settings.json with Glideship MCP config.
 
-    Copies the MCP bridge script into the repo at .bodhiorchard/mcp_bridge.py
-    and writes config with a relative path. Token is NOT included — developers
-    set BODHIORCHARD_MCP_TOKEN env var themselves.
+    Copies the MCP bridge script into the repo at ``BRIDGE_PATH`` and merges
+    the server into ``.mcp.json`` with a relative path, keeping any servers
+    the repo already lists. Token is NOT included — developers set
+    GLIDESHIP_MCP_TOKEN env var themselves.
+
+    A repo set up before the rename has a ``bodhiorchard`` server entry; it is
+    replaced by the ``glideship`` one so the tools aren't registered twice.
+    The old ``.bodhiorchard/mcp_bridge.py`` is left in place, so a checkout
+    that hasn't merged the new setup PR keeps a working bridge.
 
     Args:
         repo_path: Absolute path to the git repository.
         backend_url: URL of the Glideship backend.
 
     Returns:
-        True if the file was written (changed), False if already up to date.
+        True if anything was written (changed), False if already up to date
+        or ``.mcp.json`` can't be parsed (it is left as it was).
     """
-    import contextlib
-
     repo = Path(repo_path)
-    source_bridge = Path(__file__).resolve().parents[1] / "mcp" / "stdio_bridge.py"
-    dest_dir = repo / ".bodhiorchard"
-    dest_bridge = dest_dir / "mcp_bridge.py"
+    bridge_missing = not (repo / BRIDGE_PATH).exists()
+    merge = merge_glideship_server(repo / MCP_JSON, backend_url)
+    if merge is McpJsonMerge.UNUSABLE:
+        # Nothing would point Claude at the bridge, so don't ship it either.
+        return False
+    if merge is McpJsonMerge.UNCHANGED and not bridge_missing:
+        logger.debug("bodhiorchard_mcp_already_configured", repo=repo_path)
+        return False
 
-    # Build config (token NOT included — developer sets env var)
-    mcp_json_path = repo / ".mcp.json"
-    mcp_config = {
-        "mcpServers": {
-            "bodhiorchard": {
-                "command": "python3",
-                "args": [".bodhiorchard/mcp_bridge.py"],
-                "env": {
-                    "BODHIORCHARD_BACKEND_URL": backend_url,
-                },
-            },
-        },
-    }
-
-    # Check if config matches exactly (catches stale tokens, format changes)
-    expected_json = json.dumps(mcp_config, indent=2)
-    if mcp_json_path.exists() and dest_bridge.exists():
-        with contextlib.suppress(json.JSONDecodeError, OSError):
-            existing_mcp = mcp_json_path.read_text(encoding="utf-8", errors="replace")
-            if existing_mcp.strip() == expected_json.strip():
-                logger.debug("bodhiorchard_mcp_already_configured", repo=repo_path)
-                return False
-
-    # Copy bridge script (after early-return check)
-    dest_dir.mkdir(exist_ok=True)
-    shutil.copy2(source_bridge, dest_bridge)
-
-    mcp_json_path.write_text(json.dumps(mcp_config, indent=2), encoding="utf-8")
+    copy_mcp_bridge(repo)
 
     # Also keep .claude/settings.json for backward compatibility
     claude_dir = repo / ".claude"
@@ -675,9 +680,10 @@ async def init_bodhiorchard_mcp_in_repo(repo_path: str, backend_url: str) -> boo
         with contextlib.suppress(json.JSONDecodeError, OSError):
             settings = json.loads(settings_path.read_text(encoding="utf-8", errors="replace"))
 
-    settings.setdefault("mcpServers", {})
+    servers = settings.setdefault("mcpServers", {})
     # Overwrite with token-free config (replaces any stale token from old setups)
-    settings["mcpServers"]["bodhiorchard"] = mcp_config["mcpServers"]["bodhiorchard"]
+    servers.pop(LEGACY_MCP_SERVER_KEY, None)
+    servers[MCP_SERVER_KEY] = mcp_server_entry(backend_url)
     settings_path.write_text(json.dumps(settings, indent=2), encoding="utf-8")
 
     logger.info("bodhiorchard_mcp_written", repo=repo_path)
@@ -841,7 +847,8 @@ def _build_common_sh(backend_url: str) -> str:
         # Sourced by individual hook scripts — not executed directly.
 
         BACKEND_URL="{url}"
-        TOKEN="${{BODHIORCHARD_MCP_TOKEN:-}}"
+        # {token_env} wins when set; the pre-rename name still works.
+        TOKEN="${{{token_env}-${{{legacy_token_env}:-}}}}"
 
         escape_json() {{
           printf '%s' "$1" | sed 's/\\\\/\\\\\\\\/g; s/"/\\\\"/g' | tr '\\n\\r\\t' '   '
@@ -937,7 +944,12 @@ def _build_common_sh(backend_url: str) -> str:
             rm -f "$TMP"
           fi
         }}
-    """).format(marker=_CLAUDE_HOOK_MARKER, url=backend_url)
+    """).format(
+        marker=_CLAUDE_HOOK_MARKER,
+        url=backend_url,
+        token_env=MCP_TOKEN_ENV,
+        legacy_token_env=LEGACY_MCP_TOKEN_ENV,
+    )
 
 
 def _build_session_start_sh() -> str:
@@ -1314,8 +1326,8 @@ async def install_claude_hooks(repo_path: str, backend_url: str) -> bool:
     """Install Claude Code hook scripts in a repository.
 
     Writes hooks to ``.claude/hooks/`` and configures them in
-    ``.claude/settings.json``. Scripts use ``$BODHIORCHARD_MCP_TOKEN``
-    for auth — no org_id baked in.
+    ``.claude/settings.json``. Scripts use ``$GLIDESHIP_MCP_TOKEN`` (or the
+    legacy ``$BODHIORCHARD_MCP_TOKEN``) for auth — no org_id baked in.
 
     Idempotent: checks for marker string before writing.
 
@@ -1356,7 +1368,6 @@ async def install_claude_hooks(repo_path: str, backend_url: str) -> bool:
         changed = True
 
     # Add hooks configuration to .claude/settings.json
-    import contextlib
 
     settings_path = repo / ".claude" / "settings.json"
     settings: dict[str, Any] = {}
@@ -1494,38 +1505,6 @@ async def install_claude_hooks(repo_path: str, backend_url: str) -> bool:
     return changed
 
 
-# ── .gitignore management ──────────────────────────────────────────
-
-
-def add_bodhiorchard_gitignore(repo_path: str) -> bool:
-    """Append .bodhiorchard/ to .gitignore if not already present.
-
-    Idempotent.
-
-    Args:
-        repo_path: Absolute path to the git repository.
-
-    Returns:
-        True if the file was changed, False if already up to date.
-    """
-    gitignore = Path(repo_path) / ".gitignore"
-    entry = ".bodhiorchard/"
-
-    if gitignore.exists():
-        content = gitignore.read_text(encoding="utf-8", errors="replace")
-        if entry in content:
-            return False
-        if not content.endswith("\n"):
-            content += "\n"
-        content += f"{entry}\n"
-        gitignore.write_text(content, encoding="utf-8")
-    else:
-        gitignore.write_text(f"{entry}\n", encoding="utf-8")
-
-    logger.info("gitignore_updated", repo=repo_path)
-    return True
-
-
 # ── package.json prepare script ───────────────────────────────────
 
 
@@ -1545,7 +1524,6 @@ def add_prepare_script(repo_path: str) -> bool:
     Returns:
         True if package.json was changed, False if already up to date.
     """
-    import contextlib
 
     pkg_path = Path(repo_path) / "package.json"
 
@@ -1578,210 +1556,23 @@ def add_prepare_script(repo_path: str) -> bool:
     return True
 
 
-# ── Commit Glideship setup files ─────────────────────────────────
-
-
-async def commit_and_push_bodhiorchard_setup(repo_path: str, base_branch: str) -> str | None:
-    """Create a branch, commit Glideship setup files, and push to origin.
-
-    Creates ``bodhiorchard/init-setup`` from the base branch, stages only
-    the files Glideship modifies, commits, and pushes. The team can
-    then review via PR in their hosting platform.
-
-    Idempotent: if the branch already exists on the remote, skips.
-
-    Args:
-        repo_path: Absolute path to the git repository.
-        base_branch: Branch to create from (e.g. "main" or "master").
-
-    Returns:
-        The pushed branch name, or None if nothing to commit or push failed.
-    """
-    # Check if setup branch already exists on remote
-    stdout, _, _ = await run_git(["ls-remote", "--heads", "origin", _SETUP_BRANCH], cwd=repo_path)
-    branch_exists_remote = _SETUP_BRANCH in stdout
-
-    # Remember current branch to switch back
-    orig_branch, _, _ = await run_git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=repo_path)
-    orig_branch = orig_branch.strip()
-
-    # Earlier scan phases write Glideship's own files (MCP config, git
-    # hooks, a ``prepare`` script in package.json) directly into the
-    # working tree. Those uncommitted changes will collide with the
-    # upcoming branch switch — git refuses to checkout when it would
-    # overwrite dirty files. Stash everything (including untracked) so the
-    # switch is clean; we pop the stash back in the ``finally`` below so
-    # the staging step below still has the files to commit.
-    _, _, dirty_rc = await run_git(["diff-index", "--quiet", "HEAD", "--"], cwd=repo_path)
-    _, untracked_out, _ = await run_git(
-        ["ls-files", "--others", "--exclude-standard"], cwd=repo_path
-    )
-    has_dirty = dirty_rc != 0 or bool(untracked_out.strip())
-    stashed = False
-    if has_dirty:
-        _, _, stash_rc = await run_git(
-            ["stash", "push", "--include-untracked", "-m", "bodhiorchard-setup-pre-checkout"],
-            cwd=repo_path,
-        )
-        stashed = stash_rc == 0
-        if not stashed:
-            logger.warning(
-                "bodhiorchard_setup_stash_failed",
-                error="git stash push failed — checkout may still collide with local changes",
-            )
-
-    async def _restore_dirty_state() -> None:
-        if not stashed:
-            return
-        _, stderr, rc = await run_git(["stash", "pop"], cwd=repo_path)
-        if rc != 0:
-            # Conflict applying the stash back — usually because the target
-            # branch has a tracked file where we had an untracked one, or
-            # already modified the same lines. Keep the stash entry so the
-            # user can recover manually (``git stash list``) rather than
-            # silently committing a half-applied tree.
-            logger.warning(
-                "bodhiorchard_setup_stash_pop_conflict",
-                error=stderr[:200],
-                hint="stash entry kept; resolve via `git stash list` + `git stash apply`",
-            )
-
-    if branch_exists_remote:
-        # Fetch and check out existing branch to add any new files
-        # (e.g. updated bodhi MCP / hook configs).
-        await run_git(["fetch", "origin", _SETUP_BRANCH], cwd=repo_path)
-        _, stderr, rc = await run_git(["checkout", _SETUP_BRANCH], cwd=repo_path)
-        if rc != 0:
-            # Local branch may not exist yet — create from remote
-            _, stderr, rc = await run_git(
-                ["checkout", "-b", _SETUP_BRANCH, f"origin/{_SETUP_BRANCH}"], cwd=repo_path
-            )
-        if rc != 0:
-            logger.warning("bodhiorchard_setup_checkout_failed", error=stderr[:200])
-            await _restore_dirty_state()
-            return None
-    else:
-        # Try checking out existing local branch first
-        _, stderr, rc = await run_git(["checkout", _SETUP_BRANCH], cwd=repo_path)
-        if rc != 0:
-            # Branch doesn't exist locally — create from base
-            _, stderr, rc = await run_git(
-                ["checkout", "-b", _SETUP_BRANCH, base_branch], cwd=repo_path
-            )
-        if rc != 0:
-            logger.warning("bodhiorchard_setup_branch_failed", error=stderr[:200])
-            await _restore_dirty_state()
-            return None
-
-    # Now on the setup branch — pop the stash so the files we need to
-    # commit (MCP config, hooks, package.json prepare script) are in the
-    # working tree again.
-    await _restore_dirty_state()
-
-    try:
-        # Stage only files that have changes
-        staged_any = False
-        for filepath in _SETUP_FILES:
-            full = Path(repo_path) / filepath
-            if not full.exists():
-                continue
-            # Check untracked
-            _, _, ls_rc = await run_git(["ls-files", "--error-unmatch", filepath], cwd=repo_path)
-            is_untracked = ls_rc != 0
-            # Check modified
-            _, _, diff_rc = await run_git(["diff", "--quiet", "--", filepath], cwd=repo_path)
-            is_modified = diff_rc != 0
-
-            if is_modified or is_untracked:
-                await run_git(_stage_file_args(filepath), cwd=repo_path)
-                staged_any = True
-
-        if not staged_any:
-            logger.debug("bodhiorchard_setup_nothing_to_commit", repo=repo_path)
-            return None
-
-        # Commit
-        _, stderr, rc = await run_git(
-            [
-                "commit",
-                "-m",
-                "chore(bodhiorchard): add MCP tools, git hooks, and config\n\n"
-                "Auto-committed by Glideship scan pipeline.\n"
-                "- .claude/settings.json: Glideship MCP server config\n"
-                "- .githooks/: pre-commit (BUD validation) + post-commit (tracking)\n"
-                "- package.json: prepare script sets core.hooksPath on npm install\n"
-                "- .gitignore: exclude .bodhiorchard/ worktrees\n"
-                "- .bodhiorchard/mcp_bridge.py: stdio bridge spawned by .mcp.json\n"
-                "- CLAUDE.md: bodhi code-intelligence MCP guidance\n"
-                "- .claude/skills/: bodhi agent skill definitions",
-            ],
-            cwd=repo_path,
-        )
-        if rc != 0:
-            logger.warning("bodhiorchard_setup_commit_failed", error=stderr[:200])
-            return None
-
-        # Push to origin (force-with-lease when updating existing branch)
-        push_cmd = ["push", "-u", "origin", _SETUP_BRANCH]
-        if branch_exists_remote:
-            push_cmd = ["push", "--force-with-lease", "-u", "origin", _SETUP_BRANCH]
-        _, stderr, rc = await run_git(push_cmd, cwd=repo_path)
-        if rc != 0:
-            # No remote or push failed — merge setup into base branch directly
-            logger.info("bodhiorchard_setup_no_remote_merging", repo=repo_path)
-
-            # Remove worktrees that may lock the base branch
-            for wt_name in ("main", "develop"):
-                wt_path = Path(repo_path) / ".bodhiorchard" / wt_name
-                if wt_path.exists():
-                    await run_git(
-                        ["worktree", "remove", str(wt_path), "--force"],
-                        cwd=repo_path,
-                    )
-
-            await run_git(["checkout", base_branch], cwd=repo_path)
-            _, merge_err, merge_rc = await run_git(
-                ["merge", _SETUP_BRANCH, "--no-edit"],
-                cwd=repo_path,
-            )
-            if merge_rc == 0:
-                await run_git(["branch", "-d", _SETUP_BRANCH], cwd=repo_path)
-                logger.info("bodhiorchard_setup_merged_locally", repo=repo_path)
-                return _SETUP_BRANCH
-            logger.warning(
-                "bodhiorchard_setup_merge_failed",
-                repo=repo_path,
-                error=merge_err[:200],
-            )
-            return None
-
-        logger.info(
-            "bodhiorchard_setup_pushed",
-            repo=repo_path,
-            branch=_SETUP_BRANCH,
-        )
-        return _SETUP_BRANCH
-    finally:
-        # Remove worktrees that may lock the base branch, then switch back
-        wt_main = Path(repo_path) / ".bodhiorchard" / "main"
-        if wt_main.exists():
-            await run_git(
-                ["worktree", "remove", str(wt_main), "--force"],
-                cwd=repo_path,
-            )
-        await run_git(["checkout", base_branch], cwd=repo_path)
-
-
 _SETUP_PR_TITLE = "chore: add Glideship MCP tools, git hooks, and config"
 _SETUP_PR_BODY = (
     "## Summary\n\n"
     "Auto-generated by Glideship scan pipeline.\n\n"
-    "- `.claude/settings.json` — Glideship MCP server config\n"
+    "- `.mcp.json` + `.claude/settings.json` — Glideship MCP server config\n"
     "- `.githooks/` — pre-commit (BUD validation) + post-commit (tracking)\n"
     "- `package.json` — prepare script sets `core.hooksPath`\n"
-    "- `.gitignore` — exclude `.bodhiorchard/` worktrees\n"
-    "- `CLAUDE.md` — bodhi code-intelligence MCP guidance\n"
-    "- `.claude/skills/` — bodhi agent skill definitions\n"
+    f"- `{BRIDGE_PATH}` — stdio bridge spawned by `.mcp.json`\n"
+    "- `CLAUDE.md` — Glideship code-intelligence MCP guidance\n"
+    "- `.claude/skills/` — Glideship agent skill definitions\n\n"
+    "## If this repo was set up before the Glideship rename\n\n"
+    f"The MCP server in `.mcp.json` is now called `{MCP_SERVER_KEY}` instead of "
+    f"`{LEGACY_MCP_SERVER_KEY}`, and other servers already listed there are kept. "
+    "After merging, Claude Code asks each developer once to approve the renamed "
+    f"server, and its tools show up as `mcp__{MCP_SERVER_KEY}__*`. The hooks read "
+    "`GLIDESHIP_MCP_TOKEN` and still accept `BODHIORCHARD_MCP_TOKEN`, so dev "
+    "activity keeps posting either way.\n"
 )
 
 
@@ -1857,7 +1648,7 @@ async def create_setup_pr(
 ) -> SetupPrOutcome:
     """Open (or adopt) the Glideship MCP setup PR via the GitHub App.
 
-    Decision tree, after ``commit_and_push_bodhiorchard_setup`` succeeds:
+    Decision tree, after ``commit_and_push_setup_worktree`` succeeds:
 
     1. **GitHub App not configured** → return ``MANUAL_REQUIRED`` with the
        compare URL the row will deep-link to. No write to ``setup_pr_*``.
@@ -1870,7 +1661,7 @@ async def create_setup_pr(
        returns an error (e.g. 422 race), retry path 2 to adopt whatever
        landed; if still empty, return ``FAILED``.
 
-    The branch push itself (``commit_and_push_bodhiorchard_setup``) does
+    The branch push itself (``commit_and_push_setup_worktree``) does
     *not* need the GitHub App — it uses the org's clone credentials. Only
     the PR-open step is gated by App configuration.
     """
@@ -2023,7 +1814,7 @@ def mark_setup_branch_pushed(tracked_repo: TrackedRepository) -> None:
     """Stamp ``setup_branch_pushed_at`` to the current UTC instant.
 
     Called from the per-repo setup phase right after
-    ``commit_and_push_bodhiorchard_setup`` returns a non-empty branch
+    ``commit_and_push_setup_worktree`` returns a non-empty branch
     name. Persists "the branch is on origin" independently of whether
     the GitHub App is configured to also open a PR.
     """
