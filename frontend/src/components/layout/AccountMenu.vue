@@ -24,17 +24,22 @@
         icon
         variant="text"
         density="comfortable"
-        :aria-label="`Account menu for ${authStore.user?.name || 'you'}`"
       >
+        <!-- The monogram hides itself from assistive tech, so the hidden text
+             names the initials it shows: voice control can say what is on
+             screen, and screen readers hear whose menu it is. -->
         <AppMonogram :name="authStore.user?.name" :src="authStore.user?.avatar_url" :size="32" />
+        <span class="d-sr-only">Account menu for {{ authStore.user?.name || 'you' }} ({{ initialsOf(authStore.user?.name || '?') }})</span>
       </v-btn>
     </template>
 
-    <v-list density="compact" min-width="260">
+    <!-- A menu (the button says it opens one): every action is a menuitem,
+         and the theme choices are menuitemradio in their own group. -->
+    <v-list density="compact" min-width="260" role="menu" aria-label="Account">
       <!-- Who you are; your photo is changed on My details, so the
            header goes there. -->
-      <div v-if="authStore.user" role="listitem">
-        <router-link :to="{ name: 'my-details' }" class="account-menu__who">
+      <div v-if="authStore.user" role="none">
+        <router-link :to="{ name: 'my-details' }" class="account-menu__who" role="menuitem">
           <AppMonogram :name="authStore.user.name" :src="authStore.user.avatar_url" :size="44" />
           <span class="account-menu__id">
             <span class="account-menu__name">{{ authStore.user.name }}</span>
@@ -46,17 +51,25 @@
         </router-link>
       </div>
       <v-divider class="mb-1" />
-      <!-- XP profile, garden character and MCP token are all
-           engineering-workspace features. -->
+      <!-- XP profile and MCP token are engineering-workspace features; the
+           garden character is for anyone who may enter the Garden. -->
+      <v-list-item
+        v-if="!canAccessEngineering && canViewBoards"
+        prepend-icon="mdi-account-edit-outline"
+        title="Customize Character"
+        to="/character-select"
+      />
       <template v-if="canAccessEngineering">
         <v-list-item
           prepend-icon="mdi-account-circle-outline"
           title="My Profile"
+          role="menuitem"
           to="/profile"
         />
         <v-list-item
           prepend-icon="mdi-account-edit-outline"
           title="Customize Character"
+          role="menuitem"
           to="/character-select"
         />
         <!-- Self-service MCP token: gives Claude Code a personal
@@ -64,6 +77,7 @@
         <v-list-item
           prepend-icon="mdi-key-variant"
           title="MCP Token"
+          role="menuitem"
           to="/profile/mcp-token"
         />
       </template>
@@ -72,16 +86,17 @@
       <v-list-item
         prepend-icon="mdi-bell-cog-outline"
         title="Notification Settings"
+        role="menuitem"
         to="/profile/notifications"
       />
-      <div class="theme-pref px-3 pt-2 pb-1" role="listitem">
-        <div class="text-caption text-medium-emphasis px-1 mb-1">Theme</div>
-        <div class="theme-seg" role="radiogroup" aria-label="Theme">
+      <div class="theme-pref px-3 pt-2 pb-1" role="none">
+        <div class="text-caption text-medium-emphasis px-1 mb-1" aria-hidden="true">Theme</div>
+        <div class="theme-seg" role="group" aria-label="Theme">
           <button
             v-for="opt in THEME_OPTIONS"
             :key="opt.value"
             type="button"
-            role="radio"
+            role="menuitemradio"
             :aria-checked="themePref === opt.value"
             class="theme-seg__btn"
             :class="{ 'theme-seg__btn--active': themePref === opt.value }"
@@ -97,6 +112,7 @@
       <v-list-item
         prepend-icon="mdi-logout"
         title="Sign out"
+        role="menuitem"
         @click="handleLogout"
       />
     </v-list>
@@ -105,6 +121,7 @@
 
 <script setup lang="ts">
 import { useRouter } from 'vue-router'
+import { initialsOf } from '@/utils/avatar'
 import AppMonogram from '@/components/common/AppMonogram.vue'
 import { useAuthStore } from '@/stores/auth'
 import { usePermissions } from '@/composables/usePermissions'
@@ -112,7 +129,7 @@ import { useThemePreference, type ThemePreference } from '@/composables/useTheme
 
 const router = useRouter()
 const authStore = useAuthStore()
-const { canAccessEngineering } = usePermissions()
+const { canAccessEngineering, canViewBoards } = usePermissions()
 
 // Light/dark toggle (persisted to localStorage by the composable).
 const { preference: themePref, setPreference: setThemePref } = useThemePreference()

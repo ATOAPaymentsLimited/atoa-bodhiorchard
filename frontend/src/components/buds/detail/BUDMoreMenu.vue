@@ -15,42 +15,75 @@
  -->
 
 <!-- The header's overflow menu: move to any stage, restore a discarded
-     BUD, open the AI skills settings, delete. -->
+     BUD, send a BUD from a card back to it, open the AI skills settings,
+     delete. It opens clear of its own button (useMenuRoom), and the second
+     click of a double click isn't taken as a pick, so a quick double
+     click on the button can't change the stage. -->
 <template>
-  <v-menu location="bottom end">
+  <v-menu
+    ref="menu" v-model="open" :location="room.location.value" :offset="room.offset" :max-height="room.maxHeight.value"
+  >
     <template #activator="{ props: menuProps }">
-      <v-btn v-bind="menuProps" variant="outlined" icon="mdi-dots-horizontal" class="more-menu__btn" aria-label="More actions" />
+      <v-btn v-bind="menuProps" variant="outlined" icon="mdi-dots-horizontal" aria-label="More actions" />
     </template>
-    <v-list density="compact" min-width="200">
-      <v-list-subheader>Change stage</v-list-subheader>
-      <!-- Discarded is recoverable, closed is not: a closed BUD has already
-           run its close-out (XP, SP, learning recap), and reopening it
-           would let those fire again. -->
-      <v-list-item v-if="status === 'discarded' && canEditBuds" prepend-icon="mdi-restore" @click="emit('restore')">
-        <v-list-item-title>Restore BUD</v-list-item-title>
-      </v-list-item>
-      <v-list-item v-else-if="isClosed" disabled>
-        <v-list-item-title class="text-medium-emphasis">
-          {{ status === 'discarded' ? 'Discarded' : 'Closed' }}, so the stage can't change
-        </v-list-item-title>
-      </v-list-item>
-      <template v-else>
+    <!-- A menu (the button says it opens one). The stages are a group of
+         radio items, the current one checked; the rest are menu items. -->
+    <v-list density="compact" min-width="200" role="menu" aria-label="More actions">
+      <div role="group" aria-label="Change stage">
+        <v-list-subheader aria-hidden="true">Change stage</v-list-subheader>
+        <!-- Discarded is recoverable, closed is not: a closed BUD has already
+             run its close-out (XP, SP, learning recap), and reopening it
+             would let those fire again. -->
         <v-list-item
-          v-for="s in statusItems"
-          :key="s.value"
-          :title="s.title"
-          :active="status === s.value"
-          :disabled="agentLocked || changingStatus || !canMoveTo(s.value)"
-          @click="emit('update-status', s.value)"
-        />
-      </template>
+          v-if="status === 'discarded' && canEditBuds"
+          role="menuitem"
+          prepend-icon="mdi-restore"
+          @click="pick($event, () => emit('restore'))"
+        >
+          <v-list-item-title>Restore BUD</v-list-item-title>
+        </v-list-item>
+        <v-list-item v-else-if="isClosed" role="menuitem" aria-disabled="true" disabled>
+          <v-list-item-title class="text-medium-emphasis">
+            {{ status === 'discarded' ? 'Discarded' : 'Closed' }}, so the stage can't change
+          </v-list-item-title>
+        </v-list-item>
+        <template v-else>
+          <v-list-item
+            v-for="s in statusItems"
+            :key="s.value"
+            role="menuitemradio"
+            :aria-checked="status === s.value"
+            :aria-disabled="agentLocked || changingStatus || !canMoveTo(s.value) || status === s.value"
+            :title="s.title"
+            :active="status === s.value"
+            :disabled="agentLocked || changingStatus || !canMoveTo(s.value) || status === s.value"
+            @click="pick($event, () => emit('update-status', s.value))"
+          />
+        </template>
+      </div>
       <v-divider class="my-1" />
-      <v-list-item prepend-icon="mdi-tune-variant" :disabled="isClosed" @click="emit('open-skill-settings')">
+      <v-list-item v-if="sendBackTo" role="menuitem" prepend-icon="mdi-keyboard-return" @click="pick($event, () => emit('send-back'))">
+        <v-list-item-title>Send back to {{ sendBackTo }}…</v-list-item-title>
+      </v-list-item>
+      <v-list-item
+        role="menuitem"
+        prepend-icon="mdi-tune-variant"
+        :aria-disabled="isClosed"
+        :disabled="isClosed"
+        @click="pick($event, () => emit('open-skill-settings'))"
+      >
         <v-list-item-title>AI skills</v-list-item-title>
       </v-list-item>
       <template v-if="canDelete">
         <v-divider class="my-1" />
-        <v-list-item base-color="error" prepend-icon="mdi-delete-outline" :disabled="agentLocked" @click="emit('delete')">
+        <v-list-item
+          role="menuitem"
+          base-color="error"
+          prepend-icon="mdi-delete-outline"
+          :aria-disabled="agentLocked"
+          :disabled="agentLocked"
+          @click="pick($event, () => emit('delete'))"
+        >
           <v-list-item-title>Delete BUD</v-list-item-title>
         </v-list-item>
       </template>
@@ -59,6 +92,8 @@
 </template>
 
 <script setup lang="ts">
+import { nextTick, ref, watch } from 'vue'
+import { useMenuRoom } from '@/composables/useMenuRoom'
 import type { BUDStatus } from '@/types'
 
 defineProps<{
@@ -70,21 +105,29 @@ defineProps<{
   canEditBuds: boolean
   canMoveTo: (status: BUDStatus) => boolean
   canDelete: boolean
+  /** The board a BUD from a card can be sent back to; null when it can't. */
+  sendBackTo?: string | null
 }>()
 
 const emit = defineEmits<{
   'update-status': [status: BUDStatus]
   restore: []
+  'send-back': []
   'open-skill-settings': []
   delete: []
 }>()
-</script>
 
-<style scoped>
-.more-menu__btn {
-  width: 40px;
-  height: 40px;
-  border-radius: var(--radius-input);
-  border-color: rgb(var(--v-theme-rule));
+const open = ref(false)
+const menu = ref<{ activatorEl?: Element | null } | null>(null)
+const room = useMenuRoom()
+watch(open, isOpen => {
+  if (isOpen) room.opened(menu.value?.activatorEl)
+}, { flush: 'sync' })
+
+/** Run an item's action unless the click is the opening double click landing. */
+function pick(event: Event | undefined, run: () => void): void {
+  if (!room.picking(event)) return
+  open.value = false
+  void nextTick(run)
 }
-</style>
+</script>

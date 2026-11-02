@@ -15,8 +15,8 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import api from '@/services/api'
-import { createBugComments } from '@/stores/bugComments'
 import { extractApiError } from '@/utils/errors'
+import { latestCall } from '@/utils/latestCall'
 import {
   type BugBoardFilters,
   type BugListFilters,
@@ -46,41 +46,48 @@ export const useBugsStore = defineStore('bugs', () => {
   // Load failures for the list and board, kept apart from ``error`` (a
   // failed save, comment or attachment) so a page can show them in place.
   const loadError = ref<string | null>(null)
-  const { comments, commentsLoading, fetchComments, addComment, editComment, deleteComment } =
-    createBugComments(error, _bumpCommentCount)
+
+  // Latest list and board loads. Switching filters while one is in flight
+  // must not let the older, slower reply replace the newer list.
+  const beginListLoad = latestCall()
+  const beginBoardLoad = latestCall()
 
   async function fetchBugs(filters?: BugListFilters): Promise<void> {
+    const latest = beginListLoad()
     loading.value = true
     loadError.value = null
     try {
       const params = bugListParams(filters, page.value, pageSize.value)
       const { data } = await api.get<BugListResponse>('/v1/bugs', { params })
+      if (!latest()) return
       bugs.value = data.items
       total.value = data.total
       page.value = data.page
       pageSize.value = data.pageSize
     } catch (err) {
-      loadError.value = extractApiError(err, 'Failed to load bugs.')
+      if (latest()) loadError.value = extractApiError(err, 'Failed to load bugs.')
     } finally {
-      loading.value = false
+      if (latest()) loading.value = false
     }
   }
 
   async function fetchBoard(filters?: BugBoardFilters): Promise<void> {
+    const latest = beginBoardLoad()
     boardLoading.value = true
     loadError.value = null
     try {
       const params = bugBoardParams(filters)
       const { data } = await api.get<BugBoardResponse>('/v1/bugs/board', { params })
+      if (!latest()) return
       const merged = emptyBoard()
       for (const col of BUG_BOARD_COLUMNS) {
         merged[col] = data.columns[col] ?? []
       }
       board.value = merged
     } catch (err) {
-      loadError.value = extractApiError(err, 'Failed to load bugs.')
+      if (latest()) loadError.value = extractApiError(err, 'Failed to load bugs.')
     } finally {
-      boardLoading.value = false
+      if (latest()) boardLoading.value = false
     }
   }
 
@@ -147,7 +154,7 @@ export const useBugsStore = defineStore('bugs', () => {
    * this bug — currentBug, the paginated list, and every board column.
    * Counts are floored at 0 so a stale-state delete never goes negative.
    */
-  function _bumpCommentCount(bugId: string, delta: number): void {
+  function bumpCommentCount(bugId: string, delta: number): void {
     const apply = (n: number) => Math.max(0, n + delta)
     if (currentBug.value && currentBug.value.id === bugId) {
       currentBug.value.commentCount = apply(currentBug.value.commentCount ?? 0)
@@ -172,8 +179,6 @@ export const useBugsStore = defineStore('bugs', () => {
     currentBug,
     board,
     loadError,
-    comments,
-    commentsLoading,
     // bug ops
     fetchBugs,
     fetchBoard,
@@ -181,10 +186,6 @@ export const useBugsStore = defineStore('bugs', () => {
     createBug,
     updateBug,
     fetchBugsForBud,
-    // comment ops
-    fetchComments,
-    addComment,
-    editComment,
-    deleteComment,
+    bumpCommentCount,
   }
 })

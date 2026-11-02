@@ -14,7 +14,7 @@
  * limitations under the License.
  -->
 
-<!-- One bug comment: author, time, edit/delete controls and the body,
+<!-- One comment: author, time (and where it came from, if imported), edit/delete controls and the body,
      or an inline editor while ``editing``. The thread owns which comment
      is being edited and does the saving. -->
 <template>
@@ -23,6 +23,7 @@
       <AppMonogram :name="comment.authorName" :src="comment.authorAvatarUrl" :size="20" />
       <span class="text-caption font-weight-medium">{{ comment.authorName || 'Unknown' }}</span>
       <span class="text-caption text-medium-emphasis">{{ formatDateTime(comment.createdAt) }}</span>
+      <span v-if="comment.importLabel" class="text-caption text-medium-emphasis">· {{ comment.importLabel }}</span>
       <span v-if="comment.editedAt && !comment.deletedAt" class="text-caption text-medium-emphasis">
         (edited)
       </span>
@@ -53,8 +54,10 @@
       [deleted]
     </div>
     <div v-else-if="editing" class="d-flex flex-column ga-2">
+      <!-- No visible label, so it is named for assistive tech. -->
       <v-textarea
         v-model="draft"
+        aria-label="Comment"
         variant="outlined"
         density="compact"
         rows="2"
@@ -78,10 +81,10 @@
 <script setup lang="ts">
 import { ref } from 'vue'
 import AppMonogram from '@/components/common/AppMonogram.vue'
-import type { BugComment } from '@/types'
+import type { ThreadComment } from '@/stores/commentThread'
 import { formatDateTime } from '@/utils/date'
 
-const props = defineProps<{ comment: BugComment; editing: boolean; canModify: boolean }>()
+const props = defineProps<{ comment: ThreadComment; editing: boolean; canModify: boolean }>()
 const emit = defineEmits<{
   edit: []
   cancel: []
